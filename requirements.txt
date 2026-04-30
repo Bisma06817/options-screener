@@ -1,0 +1,10 @@
+anthropic[mcp]>=0.92
+mcp>=1.0
+tasty-agent
+gspread>=6.0
+google-auth>=2.30
+yfinance>=0.2
+python-dateutil>=2.9
+pytz>=2024.1
+tenacity>=8.2
+pytest>=8.0

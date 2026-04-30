@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.env.local
+service-account.json
+*.log
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/
+.DS_Store
+.github/workflows/
