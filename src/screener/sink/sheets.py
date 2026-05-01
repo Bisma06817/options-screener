@@ -117,6 +117,21 @@ class SheetsClient:
                 out[r[0].strip()] = r[1].strip()
         return out
 
+    @_RETRY
+    def last_log_row(self) -> dict[str, str] | None:
+        ws = self._sh.worksheet("Logs")
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return None
+        last = list(rows[-1]) + [""] * 5
+        return {
+            "timestamp_utc": last[0],
+            "status": last[1],
+            "rows": last[2],
+            "symbols_scanned": last[3],
+            "error": last[4],
+        }
+
     # ---------- writes ----------
 
     @_RETRY

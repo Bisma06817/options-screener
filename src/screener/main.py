@@ -6,10 +6,11 @@ talks to tasty-agent over MCP, with Yahoo Finance as a fallback for earnings
 dates and as the source for company names), then writes results back to the
 Sheet.
 
-Time gating: cron on the droplet fires this hourly during US market hours.
-The script no-ops unless current ET time is within `scan_window_minutes` of
-the configured `scan_time_et`. So you change the scan time from the Sheet,
-not from the cron file.
+Time gating: cron on the droplet fires this hourly. The script no-ops
+unless current ET time is within `scan_window_minutes` of the configured
+`scan_time_et`. After a successful scan, further fires the same ET day
+also no-op so the brief's "once daily" requirement holds even when the
+window spans multiple cron fires. `FORCE_RUN=1` bypasses both checks.
 """
 from __future__ import annotations
 
@@ -26,7 +27,18 @@ from .screen.filters import FilterParams
 from .sink.sheets import SheetsClient
 
 ET = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
 log = logging.getLogger("screener")
+
+
+def _already_scanned_today(last_log: dict | None, now_et: datetime) -> bool:
+    if not last_log or last_log.get("status") != "ok":
+        return False
+    try:
+        ts_utc = datetime.fromisoformat(last_log["timestamp_utc"]).replace(tzinfo=UTC)
+    except (ValueError, KeyError, TypeError):
+        return False
+    return ts_utc.astimezone(ET).date() == now_et.date()
 
 
 def _within_scan_window(scan_time_et: str, window_minutes: int, now_et: datetime) -> bool:
@@ -84,6 +96,10 @@ def run() -> int:
             "Outside scan window (target %s ET, now %s) — skipping",
             scan_time_et, now_et.strftime("%H:%M"),
         )
+        return 0
+
+    if not force and _already_scanned_today(sheets.last_log_row(), now_et):
+        log.info("Already scanned today — skipping")
         return 0
 
     watchlist = sheets.read_watchlist()

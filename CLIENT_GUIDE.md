@@ -61,7 +61,7 @@ Open the **Config** tab. Find these two rows:
 
 **Time zone is automatic.** Always enter New York wall-clock time. The system handles daylight saving on its own.
 
-**Recommended:** keep `scan_window_minutes` at `15` to ensure the scan runs only once per day.
+**Once-daily guard:** the system runs at most one successful scan per New York calendar day. Even if the scan window is wide and multiple cron fires fall inside it, only the first will scan; the rest will exit quietly. So `scan_window_minutes` is safe at any reasonable value.
 
 ---
 
