@@ -67,11 +67,17 @@ Step 3. For each surviving symbol, in order:
        - Treat 'none' (from either source) as "no upcoming earnings".
        If the earnings date falls inside the DTE window (today..max-DTE-from-today
        inclusive), SKIP this symbol entirely. Do not fetch option data for it.
-   3b. Use the appropriate tasty-agent tool to enumerate puts whose expiry is in the DTE window.
-       Restrict yourself to OTM puts (strike < spot) within roughly 25% of the underlying;
-       far-OTM puts will fail the delta filter.
-   3c. Batch-call `get_quotes` and `get_greeks` for the candidate put symbols (one batch per
-       symbol if the tool supports lists).
+   3b. Enumerate puts whose expiry is in the DTE window. Pick at most 2 expiries
+       (the closest monthly inside the window, plus one more if there is room). For
+       each chosen expiry, pick at most 6 OTM put strikes (strike < spot) clustered
+       near the spot price — roughly 5-15% OTM is where the configured delta band
+       typically lands. Far-OTM strikes (>20% OTM) will fail the delta filter and
+       waste tool calls.
+   3c. Call `get_greeks` for those strikes ONE AT A TIME, sequentially. Issue exactly
+       one `get_greeks` call per turn, wait for the result, then issue the next.
+       NEVER call multiple `get_greeks` (or any other tasty-agent tools) in parallel —
+       the MCP server cannot handle concurrent requests and will disconnect, causing
+       the entire scan to fail. Same rule for `get_quotes`: one call per turn.
    3d. For each put with |delta| in the configured band, AND with bid > 0 AND ask > 0,
        call `submit_candidate` with the fields below. Pass the symbol's earnings
        date (from step 3a) as `earnings_date`, or null if neither source returned one.
@@ -220,6 +226,7 @@ async def run_screen_async(
                 max_tokens=16000,
                 thinking={"type": "adaptive"},
                 output_config={"effort": "high"},
+                tool_choice={"type": "auto", "disable_parallel_tool_use": True},
                 system=[
                     {
                         "type": "text",
