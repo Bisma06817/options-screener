@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from .agent.screener_agent import run_screen
 from .config import DEFAULTS, Env
 from .data.yahoo import YahooClient
-from .screen.filters import FilterParams
+from .screen.filters import FilterParams, screen as enforce_filters
 from .sink.sheets import SheetsClient
 
 ET = ZoneInfo("America/New_York")
@@ -117,6 +117,13 @@ def run() -> int:
         sheets.write_log("error", 0, len(watchlist), f"{type(e).__name__}: {e}")
         return 1
 
+    raw_count = len(candidates)
+    candidates = enforce_filters(candidates, fp)
+    if len(candidates) != raw_count:
+        log.info(
+            "Filter enforcement dropped %d non-compliant candidate(s) (%d -> %d)",
+            raw_count - len(candidates), raw_count, len(candidates),
+        )
     sheets.write_results(candidates)
     sheets.write_log("ok", len(candidates), len(watchlist))
     log.info("Scan complete: %d candidates", len(candidates))

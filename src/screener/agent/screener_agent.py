@@ -39,11 +39,15 @@ log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an options-screening agent for selling cash-secured / naked short puts.
 
-Your task: from a watchlist of stocks, return all puts that pass ALL four filters:
+Your task: from a watchlist of stocks, return all puts that pass ALL FIVE filters:
 1. The symbol's IVR (Implied Volatility Rank) is >= the threshold.
 2. The put expires within the configured DTE window (calendar days, today inclusive of lower bound).
-3. The put's absolute delta is within the configured delta band.
-4. There is no earnings announcement on or between today and the put's expiry (inclusive).
+3. The put's expiration is a STANDARD MONTHLY EXPIRY — i.e. the 3rd Friday of the
+   month. Weekly expiries (any Friday other than the 3rd, or non-Friday end-of-week
+   expiries) MUST be excluded. On tastytrade these often have a "W" indicator;
+   regardless, only 3rd-Friday expirations qualify.
+4. The put's absolute delta is within the configured delta band.
+5. There is no earnings announcement on or between today and the put's expiry (inclusive).
 
 Output: for each candidate that passes every filter, call `submit_candidate` exactly once
 with the requested fields. After processing the full watchlist, respond with a one-sentence summary.
@@ -67,20 +71,21 @@ Step 3. For each surviving symbol, in order:
        - Treat 'none' (from either source) as "no upcoming earnings".
        If the earnings date falls inside the DTE window (today..max-DTE-from-today
        inclusive), SKIP this symbol entirely. Do not fetch option data for it.
-   3b. Enumerate puts whose expiry is in the DTE window. Pick at most 2 expiries
-       (the closest monthly inside the window, plus one more if there is room). For
-       each chosen expiry, pick at most 6 OTM put strikes (strike < spot) clustered
-       near the spot price — roughly 5-15% OTM is where the configured delta band
-       typically lands. Far-OTM strikes (>20% OTM) will fail the delta filter and
-       waste tool calls.
+   3b. Enumerate puts whose expiry is in the DTE window AND falls on the 3rd Friday
+       of its month (standard monthly expiry). Pick at most 2 such monthly expiries.
+       For each chosen expiry, pick at most 6 OTM put strikes (strike < spot)
+       clustered near the spot price — roughly 5-15% OTM is where the configured
+       delta band typically lands. Far-OTM strikes (>20% OTM) will fail the delta
+       filter and waste tool calls. Do NOT pick weekly expiries.
    3c. Call `get_greeks` for those strikes ONE AT A TIME, sequentially. Issue exactly
        one `get_greeks` call per turn, wait for the result, then issue the next.
        NEVER call multiple `get_greeks` (or any other tasty-agent tools) in parallel —
        the MCP server cannot handle concurrent requests and will disconnect, causing
        the entire scan to fail. Same rule for `get_quotes`: one call per turn.
    3d. For each put with |delta| in the configured band, AND with bid > 0 AND ask > 0,
-       call `submit_candidate` with the fields below. Pass the symbol's earnings
-       date (from step 3a) as `earnings_date`, or null if neither source returned one.
+       AND whose expiry is a 3rd-Friday monthly, call `submit_candidate` with the
+       fields below. Pass the symbol's earnings date (from step 3a) as `earnings_date`,
+       or null if neither source returned one.
 
 Field rules for `submit_candidate`:
 - `expiry` and `earnings_date` are ISO YYYY-MM-DD; `earnings_date` may be null.
@@ -89,9 +94,11 @@ Field rules for `submit_candidate`:
 - `expected_move` = underlying_price * IVx * sqrt(DTE / 365). IVx is decimal (0.42 = 42%).
   If you do not have a usable IVx, pass null.
 - `delta` is signed (negative for puts).
+- The OCC option symbol and P50% are derived automatically — do not compute or pass them.
 
 Hard rules:
-- NEVER call `submit_candidate` for a contract that fails any filter.
+- NEVER call `submit_candidate` for a contract that fails any filter, including the
+  monthly-expiry filter.
 - NEVER call `place_order` or any account-mutating tool. This is a read-only screening run.
 - If a tool fails for a symbol, log it (in your reasoning) and skip that symbol — do not retry forever.
 """
@@ -146,6 +153,7 @@ async def run_screen_async(
 
         Call this exactly once per qualifying contract. All numeric fields are
         plain floats / ints; expiry and earnings_date are ISO YYYY-MM-DD strings.
+        OCC option symbol and P50% are derived from these inputs.
         """
         try:
             exp_d = date.fromisoformat(expiry)
@@ -162,6 +170,7 @@ async def run_screen_async(
             "scan_date": today,
             "symbol": sym_u,
             "company": yahoo_client.company_name(sym_u),
+            "occ_symbol": _occ_symbol(sym_u, exp_d, "P", strike),
             "strike": strike,
             "put_price": put_price,
             "dte": dte,
@@ -169,7 +178,7 @@ async def run_screen_async(
             "ivr": ivr,
             "delta": delta,
             "expiry": exp_d,
-            "p50_pct": None,
+            "p50_pct": _p50_from_delta(delta),
             "bid": bid,
             "ask": ask,
             "spread": ask - bid,
@@ -278,6 +287,26 @@ def _expected_move_safety(spot: float, ivx: float | None, dte: int) -> float | N
     if ivx is None or spot <= 0 or dte <= 0:
         return None
     return spot * ivx * math.sqrt(dte / 365.0)
+
+
+def _occ_symbol(symbol: str, expiry: date, cp: str, strike: float) -> str:
+    # OSI/OCC 21-char standard: ROOT YYMMDD[C|P]NNNNNNNN where the strike is
+    # encoded as int(strike * 1000) zero-padded to 8 digits (5 dollars + 3
+    # decimals). Single space between root and the date — matches the
+    # convention used in the client's reference message and tastytrade UI.
+    yymmdd = expiry.strftime("%y%m%d")
+    strike_int = int(round(strike * 1000))
+    return f"{symbol.upper()} {yymmdd}{cp.upper()}{strike_int:08d}"
+
+
+def _p50_from_delta(delta: float | None) -> float | None:
+    # Approximation of tastytrade's P50 (probability of reaching 50% of max
+    # profit) for a short put: P50 ≈ 1 - 0.5 * |delta|. Calibrated against
+    # tastytrade UI — e.g. delta 0.18 -> 91% (UI shows ~90%); delta 0.25 ->
+    # 87.5%. Returned in percent (0-100).
+    if delta is None:
+        return None
+    return (1.0 - 0.5 * abs(delta)) * 100.0
 
 
 def run_screen(

@@ -46,10 +46,15 @@ _RETRY = retry(
 )
 
 OUTPUT_HEADERS = [
-    "Scan Date", "Symbol", "Company", "Strike", "Put Price", "DTE", "POP%",
-    "IVR%", "Delta", "Expiry Date", "P50%", "Bid", "Ask", "Spread",
-    "Underlying Price", "Earnings Date", "Expected Move",
+    "Scan Date", "Symbol", "Company", "OCC Symbol", "Strike", "Put Price",
+    "DTE", "POP%", "IVR%", "Delta", "Expiry Date", "P50%", "Bid", "Ask",
+    "Spread", "Underlying Price", "Earnings Date", "Expected Move",
 ]
+
+# 1-based column indices of $-denominated fields in OUTPUT_HEADERS, used to
+# apply a 2-decimal numberFormat so the Sheet displays "12.50" instead of
+# "12.5". Update if you reorder OUTPUT_HEADERS.
+_CURRENCY_COL_INDICES = [5, 6, 13, 14, 15, 16, 18]  # Strike, Put Price, Bid, Ask, Spread, Underlying, Expected Move
 
 DEFAULT_WATCHLIST = [
     "MU", "SNOW", "ORCL", "BIDU", "CRM", "AVGO", "ADBE", "BABA", "MRVL",
@@ -138,11 +143,15 @@ class SheetsClient:
     def write_results(self, candidates: list[dict]) -> None:
         rows = [_to_row(c) for c in candidates]
         latest = self._sh.worksheet("Latest")
+        _ensure_cols(latest, len(OUTPUT_HEADERS))
         latest.clear()
         latest.update("A1", [OUTPUT_HEADERS] + rows)
+        _apply_currency_format(latest)
         if rows:
             history = self._sh.worksheet("History")
+            _ensure_cols(history, len(OUTPUT_HEADERS))
             history.append_rows(rows, value_input_option="USER_ENTERED")
+            _apply_currency_format(history)
 
     @_RETRY
     def write_log(self, status: str, rows: int, symbols_scanned: int, error: str = "") -> None:
@@ -161,11 +170,40 @@ def _round(v: Any, places: int = 4) -> Any:
     return v
 
 
+def _ensure_cols(ws, min_cols: int) -> None:
+    # Older Latest/History tabs were created with fewer columns; expand the
+    # grid so update() / append_rows() don't fail with "out of bounds".
+    if ws.col_count < min_cols:
+        ws.resize(rows=ws.row_count, cols=min_cols)
+
+
+def _col_letter(n: int) -> str:
+    # 1 -> A, 26 -> Z, 27 -> AA. Sheets columns are 1-indexed.
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _apply_currency_format(ws) -> None:
+    # Apply "0.00" two-decimal formatting to every $-denominated column so
+    # the Sheet always shows trailing zeros (12.50 instead of 12.5).
+    fmt = {"numberFormat": {"type": "NUMBER", "pattern": "0.00"}}
+    for col in _CURRENCY_COL_INDICES:
+        letter = _col_letter(col)
+        try:
+            ws.format(f"{letter}2:{letter}", fmt)
+        except Exception as e:
+            log.warning("Could not apply currency format to %s: %s", letter, e)
+
+
 def _to_row(c: dict) -> list[Any]:
     return [
         c.get("scan_date").isoformat() if c.get("scan_date") else "",
         c.get("symbol", ""),
         c.get("company", ""),
+        c.get("occ_symbol", ""),
         _round(c.get("strike"), 2),
         _round(c.get("put_price"), 2),
         c.get("dte", ""),

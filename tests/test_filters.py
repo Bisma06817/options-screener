@@ -3,16 +3,20 @@ from datetime import date, timedelta
 from screener.screen.filters import (
     FilterParams,
     expected_move,
+    is_third_friday,
     passes_dte,
     passes_delta,
     passes_earnings,
     passes_ivr,
+    passes_monthly,
     pop_from_delta,
     screen,
 )
 
 P = FilterParams(ivr_min=50, dte_min=30, dte_max=60, delta_min=0.15, delta_max=0.25)
-TODAY = date(2026, 4, 28)
+# TODAY chosen so TODAY + 45d = 2026-06-19, which is a 3rd-Friday monthly
+# expiry — keeps the synthetic contracts in `_c()` past the monthly filter.
+TODAY = date(2026, 5, 5)
 
 
 def _c(**kw) -> dict:
@@ -75,6 +79,27 @@ def test_screen_drops_failing_rows():
     ]
     out = screen(rows, P)
     assert [r["symbol"] for r in out] == ["OK"]
+
+
+def test_is_third_friday():
+    assert is_third_friday(date(2026, 6, 19))   # 3rd Friday June 2026
+    assert is_third_friday(date(2026, 7, 17))   # 3rd Friday July 2026
+    assert not is_third_friday(date(2026, 6, 12))  # 2nd Friday — weekly
+    assert not is_third_friday(date(2026, 6, 26))  # 4th Friday — weekly
+    assert not is_third_friday(date(2026, 6, 18))  # Thursday
+
+
+def test_passes_monthly_excludes_weeklies():
+    assert passes_monthly(_c(expiry=date(2026, 6, 19)))
+    assert not passes_monthly(_c(expiry=date(2026, 6, 12)))
+    assert not passes_monthly(_c(expiry=None))
+
+
+def test_screen_excludes_weekly_expiries():
+    monthly = _c(symbol="MTH", expiry=date(2026, 6, 19))
+    weekly = _c(symbol="WK", expiry=date(2026, 6, 12))
+    out = screen([monthly, weekly], P)
+    assert [r["symbol"] for r in out] == ["MTH"]
 
 
 def test_pop_from_delta():

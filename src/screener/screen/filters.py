@@ -49,12 +49,23 @@ def passes_earnings(contract: dict) -> bool:
     return not (today <= earnings <= expiry)
 
 
+def is_third_friday(d: date) -> bool:
+    # Standard monthly equity options expire on the 3rd Friday of the month.
+    return d.weekday() == 4 and 15 <= d.day <= 21
+
+
+def passes_monthly(contract: dict) -> bool:
+    expiry: date | None = contract.get("expiry")
+    return expiry is not None and is_third_friday(expiry)
+
+
 def screen(contracts: list[dict], p: FilterParams) -> list[dict]:
     out = [
         c for c in contracts
         if passes_ivr(c, p)
         and passes_dte(c, p)
         and passes_delta(c, p)
+        and passes_monthly(c)
         and passes_earnings(c)
     ]
     out.sort(key=lambda c: (c.get("ivr") or 0.0), reverse=True)
