@@ -82,11 +82,13 @@ def test_screen_drops_failing_rows():
 
 
 def test_is_third_friday():
-    assert is_third_friday(date(2026, 6, 19))   # 3rd Friday June 2026
+    assert is_third_friday(date(2026, 6, 19))   # 3rd Friday June 2026 (Juneteenth)
     assert is_third_friday(date(2026, 7, 17))   # 3rd Friday July 2026
+    assert is_third_friday(date(2026, 6, 18))   # Juneteenth-shifted Thursday monthly
+    assert is_third_friday(date(2026, 4, 16))   # Good-Friday-shifted Thu monthly (Apr 17 = Good Fri)
     assert not is_third_friday(date(2026, 6, 12))  # 2nd Friday — weekly
     assert not is_third_friday(date(2026, 6, 26))  # 4th Friday — weekly
-    assert not is_third_friday(date(2026, 6, 18))  # Thursday
+    assert not is_third_friday(date(2026, 6, 11))  # Thursday outside day-15-21 range
 
 
 def test_passes_monthly_excludes_weeklies():

@@ -51,7 +51,12 @@ def passes_earnings(contract: dict) -> bool:
 
 def is_third_friday(d: date) -> bool:
     # Standard monthly equity options expire on the 3rd Friday of the month.
-    return d.weekday() == 4 and 15 <= d.day <= 21
+    # When the 3rd Friday is a US market holiday (e.g. Juneteenth Jun 19 2026,
+    # Good Friday) the OCC shifts that month's monthly to the prior Thursday,
+    # and weekly Thursday expiries do not exist on equities, so accepting
+    # Thursday-in-day-15-to-21 is a safe heuristic for the holiday-shifted
+    # monthly without admitting any weekly contracts.
+    return d.weekday() in (3, 4) and 15 <= d.day <= 21
 
 
 def passes_monthly(contract: dict) -> bool:
