@@ -31,22 +31,11 @@ def passes_dte(contract: dict, p: FilterParams) -> bool:
 
 def passes_delta(contract: dict, p: FilterParams) -> bool:
     """Short-put delta is reported as a negative number by the streamer.
-    The brief uses absolute magnitude (0.15..0.25)."""
+    Compared against absolute magnitude."""
     delta = contract.get("delta")
     if delta is None:
         return False
     return p.delta_min <= abs(delta) <= p.delta_max
-
-
-def passes_earnings(contract: dict) -> bool:
-    """Exclude if a known earnings date falls within the DTE window
-    (today..expiry, inclusive)."""
-    earnings: date | None = contract.get("earnings_date")
-    if earnings is None:
-        return True
-    expiry: date = contract["expiry"]
-    today: date = contract.get("scan_date") or date.today()
-    return not (today <= earnings <= expiry)
 
 
 def is_third_friday(d: date) -> bool:
@@ -71,7 +60,6 @@ def screen(contracts: list[dict], p: FilterParams) -> list[dict]:
         and passes_dte(c, p)
         and passes_delta(c, p)
         and passes_monthly(c)
-        and passes_earnings(c)
     ]
     out.sort(key=lambda c: (c.get("ivr") or 0.0), reverse=True)
     return out

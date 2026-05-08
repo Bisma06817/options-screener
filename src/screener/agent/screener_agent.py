@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an options-screening agent for selling cash-secured / naked short puts.
 
-Your task: from a watchlist of stocks, return all puts that pass ALL FIVE filters:
+Your task: from a watchlist of stocks, return all puts that pass ALL FOUR filters:
 1. The symbol's IVR (Implied Volatility Rank) is >= the threshold.
 2. The put expires within the configured DTE window (calendar days, today inclusive of lower bound).
 3. The put's expiration is a STANDARD MONTHLY EXPIRY — i.e. the 3rd Friday of the
@@ -47,7 +47,9 @@ Your task: from a watchlist of stocks, return all puts that pass ALL FIVE filter
    expiries) MUST be excluded. On tastytrade these often have a "W" indicator;
    regardless, only 3rd-Friday expirations qualify.
 4. The put's absolute delta is within the configured delta band.
-5. There is no earnings announcement on or between today and the put's expiry (inclusive).
+
+Earnings dates are captured for the output but are NOT a filter — include candidates
+regardless of upcoming earnings.
 
 Output: for each candidate that passes every filter, call `submit_candidate` exactly once
 with the requested fields. After processing the full watchlist, respond with a one-sentence summary.
@@ -64,13 +66,14 @@ Step 1. Call the tasty-agent `get_market_metrics` tool ONCE for the entire watch
 Step 2. Pre-filter symbols: keep only those whose IVR meets the threshold.
 
 Step 3. For each surviving symbol, in order:
-   3a. Determine the symbol's earnings date:
+   3a. Capture the symbol's earnings date for the output (informational only — do not
+       use it to skip the symbol):
        - If `expected_report_date` from `get_market_metrics` is present, use it.
        - If it is null/missing, call `lookup_earnings_yahoo(symbol)` ONCE for that
          symbol. The tool returns ISO YYYY-MM-DD or the literal string 'none'.
        - Treat 'none' (from either source) as "no upcoming earnings".
-       If the earnings date falls inside the DTE window (today..max-DTE-from-today
-       inclusive), SKIP this symbol entirely. Do not fetch option data for it.
+       Pass the date (or null) as `earnings_date` to `submit_candidate`. Earnings
+       inside the DTE window does NOT disqualify the symbol.
    3b. Enumerate puts whose expiry is in the DTE window AND falls on the 3rd Friday
        of its month (standard monthly expiry). Pick at most 2 such monthly expiries.
        For each chosen expiry, pick at most 6 OTM put strikes (strike < spot)

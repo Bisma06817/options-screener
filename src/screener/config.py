@@ -15,7 +15,7 @@ class Defaults:
     dte_min: int = 30
     dte_max: int = 60
     delta_min: float = 0.15
-    delta_max: float = 0.25
+    delta_max: float = 0.30
     scan_time_et: str = "15:30"
     scan_window_minutes: int = 30
 

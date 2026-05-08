@@ -6,14 +6,13 @@ from screener.screen.filters import (
     is_third_friday,
     passes_dte,
     passes_delta,
-    passes_earnings,
     passes_ivr,
     passes_monthly,
     pop_from_delta,
     screen,
 )
 
-P = FilterParams(ivr_min=50, dte_min=30, dte_max=60, delta_min=0.15, delta_max=0.25)
+P = FilterParams(ivr_min=50, dte_min=30, dte_max=60, delta_min=0.15, delta_max=0.30)
 # TODAY chosen so TODAY + 45d = 2026-06-19, which is a 3rd-Friday monthly
 # expiry — keeps the synthetic contracts in `_c()` past the monthly filter.
 TODAY = date(2026, 5, 5)
@@ -49,17 +48,10 @@ def test_dte_band():
 
 def test_delta_band_uses_absolute_value():
     assert passes_delta(_c(delta=-0.15), P)
-    assert passes_delta(_c(delta=-0.25), P)
+    assert passes_delta(_c(delta=-0.30), P)
     assert passes_delta(_c(delta=0.20), P)
     assert not passes_delta(_c(delta=-0.10), P)
-    assert not passes_delta(_c(delta=-0.30), P)
-
-
-def test_earnings_excluded_when_in_window():
-    expiry = TODAY + timedelta(days=45)
-    assert not passes_earnings(_c(expiry=expiry, earnings_date=TODAY + timedelta(days=10)))
-    assert passes_earnings(_c(expiry=expiry, earnings_date=expiry + timedelta(days=1)))
-    assert passes_earnings(_c(expiry=expiry, earnings_date=None))
+    assert not passes_delta(_c(delta=-0.31), P)
 
 
 def test_screen_ranks_by_ivr_desc():
@@ -75,10 +67,10 @@ def test_screen_drops_failing_rows():
         _c(symbol="OK", ivr=70),
         _c(symbol="LowIVR", ivr=10),
         _c(symbol="WideDTE", dte=80),
-        _c(symbol="Earn", earnings_date=TODAY + timedelta(days=5)),
+        _c(symbol="WithEarnings", earnings_date=TODAY + timedelta(days=5)),
     ]
     out = screen(rows, P)
-    assert [r["symbol"] for r in out] == ["OK"]
+    assert [r["symbol"] for r in out] == ["OK", "WithEarnings"]
 
 
 def test_is_third_friday():
