@@ -1,9 +1,15 @@
 """Parse OSI 21-char option symbols.
 
-Format: ROOT YYMMDD[C|P]NNNNNNNN — single space between the root and the
-date, strike encoded as int(strike * 1000) zero-padded to 8 digits.
+Standard format: ROOT YYMMDD[C|P]NNNNNNNN — single space between the
+root and the date, strike encoded as int(strike * 1000) zero-padded to
+8 digits.
 
-Example: 'AVGO 260515P00270000' -> AVGO, 2026-05-15, put, strike 270.0
+  Example: 'AVGO 260515P00270000' -> AVGO, 2026-05-15, put, strike 270.0
+
+Stan's legacy tracker uses a variant with double spaces and a trailing
+(YYYYMMDD) purchase-date suffix — those are accepted too:
+
+  Example: 'AVGO  260515P00270000 (20260317)' -> same as above.
 """
 from __future__ import annotations
 
@@ -11,7 +17,13 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
-_OCC_RE = re.compile(r"^([A-Z][A-Z0-9.]{0,5})\s+(\d{6})([CP])(\d{8})$")
+# Symbol + (one or more whitespace) + YYMMDD + C/P + 8-digit strike
+# Optionally followed by whitespace and a "(YYYYMMDD)" purchase-date
+# suffix (Stan's legacy format). The suffix is matched but discarded —
+# Purchase Date lives in its own column on the tracker sheet.
+_OCC_RE = re.compile(
+    r"^([A-Z][A-Z0-9.]{0,5})\s+(\d{6})([CP])(\d{8})\s*(?:\(\d{8}\))?$"
+)
 
 
 @dataclass(frozen=True)
