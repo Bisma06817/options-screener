@@ -48,13 +48,18 @@ _RETRY = retry(
 OUTPUT_HEADERS = [
     "Scan Date", "Symbol", "Company", "OCC Symbol", "Strike", "Put Price",
     "DTE", "POP%", "IVR%", "Delta", "Expiry Date", "P50%", "Bid", "Ask",
-    "Spread", "Underlying Price", "Earnings Date", "Expected Move",
+    "Spread", "Underlying Price", "Earnings Date", "Expected Move", "Track",
 ]
 
 # 1-based column indices of $-denominated fields in OUTPUT_HEADERS, used to
 # apply a 2-decimal numberFormat so the Sheet displays "12.50" instead of
 # "12.5". Update if you reorder OUTPUT_HEADERS.
 _CURRENCY_COL_INDICES = [5, 6, 13, 14, 15, 16, 18]  # Strike, Put Price, Bid, Ask, Spread, Underlying, Expected Move
+
+# 1-based column index of the "Track" checkbox column. When ticked by the
+# user in the Latest tab, an Apps Script onEdit trigger copies that row's
+# data into the tracker sheet to start daily price tracking on the option.
+_TRACK_COL_INDEX = 19
 
 DEFAULT_WATCHLIST = [
     "MU", "SNOW", "ORCL", "BIDU", "CRM", "AVGO", "ADBE", "BABA", "MRVL",
@@ -154,13 +159,43 @@ class SheetsClient:
         latest = self._sh.worksheet("Latest")
         _ensure_cols(latest, len(OUTPUT_HEADERS))
         latest.clear()
-        latest.update("A1", [OUTPUT_HEADERS] + rows)
+        latest.update("A1", [OUTPUT_HEADERS] + rows, value_input_option="USER_ENTERED")
         _apply_currency_format(latest)
+        self._apply_track_checkbox(latest, num_data_rows=len(rows))
         if rows:
             history = self._sh.worksheet("History")
             _ensure_cols(history, len(OUTPUT_HEADERS))
             history.append_rows(rows, value_input_option="USER_ENTERED")
             _apply_currency_format(history)
+
+    def _apply_track_checkbox(self, ws, num_data_rows: int) -> None:
+        """Set data validation rule (BOOLEAN / checkbox UI) on the Track
+        column. Without this, the cells render as the literal text "FALSE"
+        instead of as tickable checkboxes.
+        """
+        if num_data_rows <= 0:
+            return
+        try:
+            self._sh.batch_update({
+                "requests": [{
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 1,  # skip header
+                            "endRowIndex": 1 + num_data_rows,
+                            "startColumnIndex": _TRACK_COL_INDEX - 1,
+                            "endColumnIndex": _TRACK_COL_INDEX,
+                        },
+                        "rule": {
+                            "condition": {"type": "BOOLEAN"},
+                            "showCustomUi": True,
+                            "strict": True,
+                        },
+                    }
+                }]
+            })
+        except Exception as e:
+            log.warning("Could not apply Track checkbox validation: %s", e)
 
     @_RETRY
     def write_log(self, status: str, rows: int, symbols_scanned: int, error: str = "") -> None:
@@ -227,4 +262,5 @@ def _to_row(c: dict) -> list[Any]:
         _round(c.get("underlying_price"), 2),
         c.get("earnings_date").isoformat() if c.get("earnings_date") else "",
         _round(c.get("expected_move"), 2),
+        False,  # Track checkbox — Apps Script onEdit fires when user ticks this
     ]
