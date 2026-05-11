@@ -81,33 +81,83 @@ class TrackerClient:
         self._sh = self._gc.open_by_key(spreadsheet_id)
         self._main_tab_cache: gspread.Worksheet | None = None
 
-    def _main_tab(self) -> gspread.Worksheet:
-        if self._main_tab_cache is None:
-            # The main tracker tab is identified by having "OCC" in row 1.
-            # Stan's workbook has a "Summary" tab at index 0 with merged
-            # cells / blank header — using positional lookup hits that and
-            # crashes get_all_records(). Scanning for the OCC header is
-            # robust to any tab order.
-            for ws in self._sh.worksheets():
-                try:
-                    row1 = ws.row_values(1)
-                except Exception:
-                    continue
-                if any(str(h).strip().upper() == "OCC" for h in row1):
-                    self._main_tab_cache = ws
-                    log.info("Tracker main tab: %r", ws.title)
-                    break
-            if self._main_tab_cache is None:
-                raise RuntimeError(
-                    "Could not find tracker main tab — no worksheet has 'OCC' header in row 1"
-                )
-        return self._main_tab_cache
+    # Tab names to try (in order) before falling back to header scan.
+    # Stan's workbook uses "Tab" as the main tab name; the others are
+    # common fallbacks.
+    _CANDIDATE_TAB_NAMES = ("Tab", "Positions", "Tracker", "Open Positions",
+                            "Tasty Trade Open Position 2026")
+    # Cap how many tabs we header-scan before giving up. Stan's workbook
+    # has ~50 per-option historical tabs; scanning every one hits Sheets
+    # rate limits.
+    _MAX_HEADER_SCAN = 10
+    # Stan's main tab has a title row at row 1 and a blank at row 2; the
+    # actual OCC header is on row 3. Scan a few rows down to find it.
+    _MAX_HEADER_ROW = 5
+
+    def _find_header_row(self, ws) -> int | None:
+        """Return the 1-based row number containing an 'OCC' header, or None."""
+        for row_num in range(1, self._MAX_HEADER_ROW + 1):
+            try:
+                row = ws.row_values(row_num)
+            except Exception:
+                continue
+            if any("OCC" in str(h).strip().upper() for h in row):
+                return row_num
+        return None
+
+    def _main_tab(self) -> tuple[gspread.Worksheet | None, int | None]:
+        """Find the main tracker tab + its header row.
+
+        Returns (None, None) if no suitable tab exists yet — caller treats
+        this as "no positions to track" rather than an error. The Apps
+        Script tick handler creates the tab on first checkbox tick.
+        """
+        if self._main_tab_cache is not None:
+            return self._main_tab_cache
+
+        # Try common tab names first (cheap, ~1 API call per try).
+        for name in self._CANDIDATE_TAB_NAMES:
+            try:
+                ws = self._sh.worksheet(name)
+            except gspread.WorksheetNotFound:
+                continue
+            header_row = self._find_header_row(ws)
+            if header_row is not None:
+                self._main_tab_cache = (ws, header_row)
+                log.info("Tracker main tab (named %r, header row %d)", ws.title, header_row)
+                return self._main_tab_cache
+
+        # Fall back to scanning the first few sheets for an OCC-style
+        # header. Permissive match — any cell containing 'OCC' counts.
+        for ws in self._sh.worksheets()[: self._MAX_HEADER_SCAN]:
+            header_row = self._find_header_row(ws)
+            if header_row is not None:
+                self._main_tab_cache = (ws, header_row)
+                log.info("Tracker main tab (scan %r, header row %d)", ws.title, header_row)
+                return self._main_tab_cache
+
+        log.info(
+            "Tracker main tab not found (tried %s and scanned first %d sheets, "
+            "checking rows 1-%d for an OCC header). Refresh will skip.",
+            self._CANDIDATE_TAB_NAMES, self._MAX_HEADER_SCAN, self._MAX_HEADER_ROW,
+        )
+        return (None, None)
 
     @_RETRY
     def read_open_positions(self) -> list[dict]:
-        """Return every row on the main tab where Status == OPEN."""
-        ws = self._main_tab()
-        records = ws.get_all_records(head=1)
+        """Return every row on the main tab where Status == OPEN.
+
+        Returns an empty list (no exception) if the main tab doesn't yet
+        exist — the Apps Script tick handler will create it on first use.
+        """
+        ws, header_row = self._main_tab()
+        if ws is None or header_row is None:
+            return []
+        try:
+            records = ws.get_all_records(head=header_row)
+        except Exception as e:
+            log.warning("Tracker main tab %r could not be parsed: %s", ws.title, e)
+            return []
         return [
             r for r in records
             if str(r.get("Status", "")).strip().upper() == "OPEN"
@@ -120,12 +170,22 @@ class TrackerClient:
 
         `updates` keys must be column header names from MAIN_HEADERS.
         """
-        ws = self._main_tab()
-        records = ws.get_all_records(head=1)
+        ws, header_row = self._main_tab()
+        if ws is None or header_row is None:
+            log.warning("update_main_row: no main tab exists — skipping %s", occ)
+            return
+        try:
+            records = ws.get_all_records(head=header_row)
+        except Exception as e:
+            log.warning("update_main_row: cannot parse main tab: %s", e)
+            return
         target_row = None
         for i, r in enumerate(records):
             if str(r.get("OCC", "")).strip() == occ:
-                target_row = i + 2  # +1 header, +1 1-based
+                # +1 to step past header, then +header_row to account for
+                # the rows before the header. Result is the 1-based row
+                # number of this record in the sheet.
+                target_row = header_row + 1 + i
                 break
         if target_row is None:
             log.warning("update_main_row: OCC %s not found on main tab", occ)

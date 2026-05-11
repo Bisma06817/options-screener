@@ -103,17 +103,22 @@ function onTickInstalled(e) {
   const purchaseDate = todayIsoEt();
 
   const tracker = SpreadsheetApp.openById(TRACKER_SHEET_ID);
-  const mainTab = findMainTab(tracker);
-  if (!mainTab) {
+  const found = findMainTab(tracker);
+  if (!found) {
     SpreadsheetApp.getUi().alert(
-      'Track failed: could not find the main position tab in the tracker (no sheet has "OCC" in row 1).'
+      'Track failed: could not find the main position tab in the tracker ' +
+      '(no sheet has an "OCC" header in rows 1-5).'
     );
     range.setValue(false);
     return;
   }
+  const mainTab = found.sheet;
+  const headerRow = found.headerRow;
 
   // Don't duplicate — if this OCC is already on the main tab, bail.
-  const occColumn = mainTab.getRange(2, 1, mainTab.getLastRow() || 1, 1).getValues().flat();
+  const firstDataRow = headerRow + 1;
+  const lastRow = Math.max(mainTab.getLastRow(), firstDataRow);
+  const occColumn = mainTab.getRange(firstDataRow, 1, lastRow - firstDataRow + 1, 1).getValues().flat();
   if (occColumn.indexOf(occ) >= 0) {
     SpreadsheetApp.getUi().alert(occ + ' is already in the tracker.');
     range.setValue(false);
@@ -150,17 +155,42 @@ function onTickInstalled(e) {
 }
 
 function findMainTab(tracker) {
-  // Stan's workbook has a "Summary" tab at index 0 with merged headers.
-  // The position-tracking tab is identified by "OCC" in row 1, not by
-  // position — handles any tab order.
-  const sheets = tracker.getSheets();
-  for (const sh of sheets) {
+  // Stan's main tab is literally named "Tab" with row 1 as a title row,
+  // row 2 blank, and the OCC header on row 3. We try common names first
+  // (cheap), then scan the first few sheets for an OCC header in rows
+  // 1-5 — permissive 'contains OCC' match so 'OCC Symbol' or 'OCC' both
+  // count. Returns { sheet, headerRow } or null.
+  const CANDIDATE_NAMES = ['Tab', 'Positions', 'Tracker', 'Open Positions'];
+  const MAX_HEADER_ROW = 5;
+  const MAX_SCAN_SHEETS = 10;
+
+  function headerRowOf(sh) {
     const lastCol = sh.getLastColumn();
-    if (lastCol < 1) continue;
-    const row1 = sh.getRange(1, 1, 1, lastCol).getValues()[0];
-    if (row1.some(h => String(h).trim().toUpperCase() === 'OCC')) {
-      return sh;
+    if (lastCol < 1) return null;
+    const maxRow = Math.min(MAX_HEADER_ROW, sh.getLastRow());
+    if (maxRow < 1) return null;
+    const rows = sh.getRange(1, 1, maxRow, lastCol).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].some(h => String(h).trim().toUpperCase().indexOf('OCC') >= 0)) {
+        return i + 1; // 1-based
+      }
     }
+    return null;
+  }
+
+  // Try common tab names first.
+  for (const name of CANDIDATE_NAMES) {
+    const sh = tracker.getSheetByName(name);
+    if (!sh) continue;
+    const hr = headerRowOf(sh);
+    if (hr !== null) return { sheet: sh, headerRow: hr };
+  }
+
+  // Fall back to scanning the first few sheets.
+  const sheets = tracker.getSheets().slice(0, MAX_SCAN_SHEETS);
+  for (const sh of sheets) {
+    const hr = headerRowOf(sh);
+    if (hr !== null) return { sheet: sh, headerRow: hr };
   }
   return null;
 }
