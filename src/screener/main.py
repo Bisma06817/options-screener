@@ -25,6 +25,8 @@ from .config import DEFAULTS, Env
 from .data.yahoo import YahooClient
 from .screen.filters import FilterParams, screen as enforce_filters
 from .sink.sheets import SheetsClient
+from .tracker.refresh import refresh_open_positions
+from .tracker.sheets_tracker import TrackerClient
 
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
@@ -127,6 +129,20 @@ def run() -> int:
     sheets.write_results(candidates)
     sheets.write_log("ok", len(candidates), len(watchlist))
     log.info("Scan complete: %d candidates", len(candidates))
+
+    # Task 2 — refresh every OPEN position in Stan's tracker sheet.
+    # Skipped when TRACKER_SPREADSHEET_ID is unset (e.g. development) or
+    # when the refresh errors — the screener result is the contract, the
+    # tracker is a best-effort overlay.
+    if env.tracker_spreadsheet_id:
+        try:
+            tracker = TrackerClient(env.google_sa_json, env.tracker_spreadsheet_id)
+            updated = refresh_open_positions(env, tracker)
+            log.info("Tracker refresh: %d positions updated.", updated)
+        except Exception as e:
+            log.exception("Tracker refresh failed (screener result unaffected): %s", e)
+    else:
+        log.info("TRACKER_SPREADSHEET_ID unset — tracker refresh skipped.")
     return 0
 
 

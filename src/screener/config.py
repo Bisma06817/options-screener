@@ -28,6 +28,7 @@ class Env:
     anthropic_api_key: str
     google_sa_json: str
     spreadsheet_id: str
+    tracker_spreadsheet_id: str  # Task 2 — Stan's position tracker workbook
 
     @staticmethod
     def load() -> "Env":
@@ -37,6 +38,9 @@ class Env:
                 raise RuntimeError(f"Missing required env var: {key}")
             return v
 
+        def _opt(key: str) -> str:
+            return os.environ.get(key, "").strip()
+
         return Env(
             tt_client_secret=_req("TASTYTRADE_CLIENT_SECRET"),
             tt_refresh_token=_req("TASTYTRADE_REFRESH_TOKEN"),
@@ -44,6 +48,8 @@ class Env:
             anthropic_api_key=_req("ANTHROPIC_API_KEY"),
             google_sa_json=_req("GOOGLE_SERVICE_ACCOUNT_JSON"),
             spreadsheet_id=_req("SPREADSHEET_ID"),
+            # Optional — if blank, the tracker refresh is skipped at run-time.
+            tracker_spreadsheet_id=_opt("TRACKER_SPREADSHEET_ID"),
         )
 
 
