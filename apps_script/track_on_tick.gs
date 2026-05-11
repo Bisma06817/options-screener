@@ -103,7 +103,14 @@ function onTickInstalled(e) {
   const purchaseDate = todayIsoEt();
 
   const tracker = SpreadsheetApp.openById(TRACKER_SHEET_ID);
-  const mainTab = tracker.getSheets()[0];
+  const mainTab = findMainTab(tracker);
+  if (!mainTab) {
+    SpreadsheetApp.getUi().alert(
+      'Track failed: could not find the main position tab in the tracker (no sheet has "OCC" in row 1).'
+    );
+    range.setValue(false);
+    return;
+  }
 
   // Don't duplicate — if this OCC is already on the main tab, bail.
   const occColumn = mainTab.getRange(2, 1, mainTab.getLastRow() || 1, 1).getValues().flat();
@@ -140,6 +147,22 @@ function onTickInstalled(e) {
 
   // Reset the checkbox so a second tick on the same row doesn't re-fire.
   range.setValue(false);
+}
+
+function findMainTab(tracker) {
+  // Stan's workbook has a "Summary" tab at index 0 with merged headers.
+  // The position-tracking tab is identified by "OCC" in row 1, not by
+  // position — handles any tab order.
+  const sheets = tracker.getSheets();
+  for (const sh of sheets) {
+    const lastCol = sh.getLastColumn();
+    if (lastCol < 1) continue;
+    const row1 = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+    if (row1.some(h => String(h).trim().toUpperCase() === 'OCC')) {
+      return sh;
+    }
+  }
+  return null;
 }
 
 function midOf(bid, ask) {

@@ -83,10 +83,24 @@ class TrackerClient:
 
     def _main_tab(self) -> gspread.Worksheet:
         if self._main_tab_cache is None:
-            # The main tracker tab is whatever the first worksheet is —
-            # Stan named it "Tasty Trade Open Position 2026" and dedicated
-            # per-option tabs come after it.
-            self._main_tab_cache = self._sh.get_worksheet(0)
+            # The main tracker tab is identified by having "OCC" in row 1.
+            # Stan's workbook has a "Summary" tab at index 0 with merged
+            # cells / blank header — using positional lookup hits that and
+            # crashes get_all_records(). Scanning for the OCC header is
+            # robust to any tab order.
+            for ws in self._sh.worksheets():
+                try:
+                    row1 = ws.row_values(1)
+                except Exception:
+                    continue
+                if any(str(h).strip().upper() == "OCC" for h in row1):
+                    self._main_tab_cache = ws
+                    log.info("Tracker main tab: %r", ws.title)
+                    break
+            if self._main_tab_cache is None:
+                raise RuntimeError(
+                    "Could not find tracker main tab — no worksheet has 'OCC' header in row 1"
+                )
         return self._main_tab_cache
 
     @_RETRY
