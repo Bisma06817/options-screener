@@ -94,14 +94,23 @@ class SheetsClient:
             rows = [["Key", "Value"]] + [[k, str(v)] for k, v in DEFAULT_CONFIG.items()]
             ws.update("A1", rows)
         if "Latest" not in existing:
-            ws = self._sh.add_worksheet("Latest", rows=200, cols=len(OUTPUT_HEADERS))
-            ws.update("A1", [OUTPUT_HEADERS])
+            self._sh.add_worksheet("Latest", rows=200, cols=len(OUTPUT_HEADERS))
         if "History" not in existing:
-            ws = self._sh.add_worksheet("History", rows=2000, cols=len(OUTPUT_HEADERS))
-            ws.update("A1", [OUTPUT_HEADERS])
+            self._sh.add_worksheet("History", rows=2000, cols=len(OUTPUT_HEADERS))
         if "Logs" not in existing:
-            ws = self._sh.add_worksheet("Logs", rows=500, cols=len(LOG_HEADERS))
-            ws.update("A1", [LOG_HEADERS])
+            self._sh.add_worksheet("Logs", rows=500, cols=len(LOG_HEADERS))
+        # Sync headers on every run so column additions/reorderings self-heal
+        # on existing tabs (otherwise History row 1 stays frozen at first-run layout).
+        self._sync_header("Latest", OUTPUT_HEADERS)
+        self._sync_header("History", OUTPUT_HEADERS)
+        self._sync_header("Logs", LOG_HEADERS)
+
+    def _sync_header(self, tab: str, headers: list[str]) -> None:
+        ws = self._sh.worksheet(tab)
+        _ensure_cols(ws, len(headers))
+        current = ws.row_values(1)
+        if current[: len(headers)] != headers:
+            ws.update("A1", [headers])
 
     # ---------- reads ----------
 
