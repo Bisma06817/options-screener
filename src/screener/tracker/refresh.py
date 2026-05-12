@@ -36,6 +36,7 @@ from .sheets_tracker import TrackerClient
 log = logging.getLogger(__name__)
 
 _QUOTE_TIMEOUT_SEC = 15.0
+_CHUNK_SIZE = 10
 
 
 async def _gather_market_data(
@@ -71,7 +72,15 @@ async def _gather_market_data(
         provider_secret=env.tt_client_secret,
         refresh_token=env.tt_refresh_token,
     ) as session:
-        details = await get_instrument_details(session, [spec for _, spec in labelled])
+        # tasty-agent's get_instrument_details uses asyncio.gather with no
+        # concurrency cap. 40+ simultaneous HTTPS calls to api.tastyworks.com
+        # exhaust the connection pool and surface as httpx.ConnectTimeout.
+        # Chunk the spec list so at most _CHUNK_SIZE requests run in parallel.
+        specs = [spec for _, spec in labelled]
+        details: list = []
+        for i in range(0, len(specs), _CHUNK_SIZE):
+            chunk = specs[i : i + _CHUNK_SIZE]
+            details.extend(await get_instrument_details(session, chunk))
         streamer_symbols = [d.streamer_symbol for d in details]
         quotes = await stream_events(session, Quote, streamer_symbols, _QUOTE_TIMEOUT_SEC)
         metrics_list = await get_market_metrics(session, sorted(symbols))
