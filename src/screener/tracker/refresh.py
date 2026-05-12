@@ -120,7 +120,24 @@ async def refresh_open_positions_async(
         log.info("Tracker refresh: no parseable OPEN positions.")
         return 0
 
-    log.info("Tracker refresh: processing %d open position(s)", len(parsed_positions))
+    # Expired contracts can't be quoted — tastytrade drops them from the chain.
+    # A single expired position would raise inside tasty-agent's asyncio.gather
+    # and kill the whole batch, so filter them out up front.
+    live, expired = [], []
+    for p, occ in parsed_positions:
+        (live if occ.expiration >= today else expired).append((p, occ))
+    if expired:
+        log.info(
+            "Tracker refresh: skipping %d expired position(s) (Stan should mark CLOSED): %s",
+            len(expired),
+            ", ".join(p["OCC"] for p, _ in expired),
+        )
+    parsed_positions = live
+    if not parsed_positions:
+        log.info("Tracker refresh: no live OPEN positions after expiry filter.")
+        return 0
+
+    log.info("Tracker refresh: processing %d live open position(s)", len(parsed_positions))
     try:
         market = await _gather_market_data(env, parsed_positions)
     except Exception as e:
