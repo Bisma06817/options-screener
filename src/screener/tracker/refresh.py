@@ -167,6 +167,10 @@ async def refresh_open_positions_async(
 
     updated = 0
     for position, occ in parsed_positions:
+        # Replace the raw Expiration cell value (which on legacy rows is a
+        # JS Date toString() like 'Thu Jun 18 2026 00:00:00 GMT-0700 ...')
+        # with the parsed ISO date so the dedicated tab's static block heals.
+        position["Expiration"] = occ.expiration.isoformat()
         try:
             row_updates, daily = _compute_row(
                 position, occ, today, quote_by_label, metrics_by_sym, vix_value
@@ -233,6 +237,10 @@ def _compute_row(
     expected_move = _expected_move(underlying, ivx, dte)
 
     row_updates: dict[str, Any] = {
+        # Expiration is included so that legacy rows written with a JS
+        # Date toString() (e.g. 'Thu Jun 18 2026 00:00:00 GMT-0700 ...')
+        # get healed to a real ISO date on the next refresh.
+        "Expiration": occ.expiration,
         "Current Price": current_price,
         "P&L": pnl,
         "IVR": ivr,

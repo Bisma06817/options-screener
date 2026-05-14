@@ -209,37 +209,55 @@ class TrackerClient:
     def ensure_dedicated_tab(
         self, occ: str, position: dict[str, Any]
     ) -> gspread.Worksheet:
-        """Create the per-option tab if missing, populate static-info block."""
+        """Create the per-option tab if missing; always (re)write the static
+        block + daily-row header so existing tabs with stale or malformed
+        static info self-heal on the next refresh.
+        """
         try:
             ws = self._sh.worksheet(occ)
-            return ws
         except gspread.WorksheetNotFound:
-            pass
+            ws = self._sh.add_worksheet(
+                occ, rows=500, cols=max(len(DAILY_HEADERS), len(STATIC_HEADERS))
+            )
+            log.info("Created dedicated tracker tab: %s", occ)
 
-        ws = self._sh.add_worksheet(
-            occ, rows=500, cols=max(len(DAILY_HEADERS), len(STATIC_HEADERS))
-        )
-        # Static info: rows 1-2
         static_values = [_serialize(position.get(h, "")) for h in STATIC_HEADERS]
         ws.update("A1", [STATIC_HEADERS, static_values], value_input_option="USER_ENTERED")
         # Row 3 stays blank as a visual separator.
-        # Daily-row headers on row 4.
         ws.update(f"A{_DAILY_HEADER_ROW}", [DAILY_HEADERS], value_input_option="USER_ENTERED")
-        log.info("Created dedicated tracker tab: %s", occ)
         return ws
 
     @_RETRY
     def append_daily_row(
         self, occ: str, position: dict[str, Any], daily: dict[str, Any]
     ) -> None:
-        """Append one new daily row to this option's dedicated tab.
+        """Upsert today's daily row on this option's dedicated tab.
+
+        If the last data row's Date equals today's daily['Date'], overwrite
+        that row (so the Apps Script's partial day-1 row gets healed on the
+        next cron). Otherwise append a new row.
 
         `daily` keys must be column header names from DAILY_HEADERS.
         Missing keys are written as empty string.
         """
         ws = self.ensure_dedicated_tab(occ, position)
         row = [_serialize(daily.get(h, "")) for h in DAILY_HEADERS]
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        today_iso = _serialize(daily.get("Date", ""))
+
+        # Read the Date column unformatted so we get either a Sheets serial
+        # (number, when the cell is a real date) or the raw string (when it
+        # was written as text). Locale display format then doesn't matter.
+        date_col = ws.col_values(1, value_render_option="UNFORMATTED_VALUE")
+        last_row = len(date_col)
+        same_day = (
+            last_row > _DAILY_HEADER_ROW
+            and _is_same_iso_date(date_col[last_row - 1], today_iso)
+        )
+        if same_day:
+            target_a1 = f"A{last_row}:{_col_letter(len(DAILY_HEADERS))}{last_row}"
+            ws.update(target_a1, [row], value_input_option="USER_ENTERED")
+        else:
+            ws.append_row(row, value_input_option="USER_ENTERED")
 
 
 def _serialize(v: Any) -> Any:
@@ -250,6 +268,36 @@ def _serialize(v: Any) -> Any:
     if isinstance(v, float):
         return round(v, 4)
     return v
+
+
+# Sheets stores dates as days since 1899-12-30 (Lotus 1-2-3 compat).
+_SHEETS_EPOCH = date(1899, 12, 30)
+
+
+def _is_same_iso_date(cell_value: Any, iso: str) -> bool:
+    """True if cell_value (unformatted) represents the same calendar date
+    as the iso string (e.g. '2026-05-13').
+    """
+    if not iso:
+        return False
+    try:
+        target = date.fromisoformat(str(iso).strip())
+    except ValueError:
+        return False
+    if isinstance(cell_value, (int, float)):
+        # Sheets serial: integer days since 1899-12-30.
+        try:
+            target_serial = (target - _SHEETS_EPOCH).days
+            return int(cell_value) == target_serial
+        except (ValueError, OverflowError):
+            return False
+    s = str(cell_value).strip()
+    if not s:
+        return False
+    try:
+        return date.fromisoformat(s) == target
+    except ValueError:
+        return False
 
 
 def _col_letter(n: int) -> str:

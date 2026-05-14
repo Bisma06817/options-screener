@@ -90,7 +90,7 @@ function onTickInstalled(e) {
   const symbol = String(rowData[COL.SYMBOL - 1] || '');
   const company = String(rowData[COL.COMPANY - 1] || '');
   const strike = Number(rowData[COL.STRIKE - 1]) || 0;
-  const expiry = String(rowData[COL.EXPIRY - 1] || '');
+  const expiry = isoDate(rowData[COL.EXPIRY - 1]);
   const bid = Number(rowData[COL.BID - 1]) || 0;
   const ask = Number(rowData[COL.ASK - 1]) || 0;
   const underlying = Number(rowData[COL.UNDERLYING - 1]) || 0;
@@ -131,6 +131,10 @@ function onTickInstalled(e) {
     purchaseDate, pricePaid, pricePaid, 0, 'OPEN',
     ivr, '', '', expectedMove, limit,
   ]);
+  // Force yyyy-mm-dd on the just-written Expiration (col 5) + Purchase Date
+  // (col 6) cells so display is locale-independent.
+  const mainRowIdx = mainTab.getLastRow();
+  mainTab.getRange(mainRowIdx, 5, 1, 2).setNumberFormat('yyyy-mm-dd');
 
   // Dedicated tab — create or reuse.
   let dedicatedTab = tracker.getSheetByName(occ);
@@ -144,11 +148,16 @@ function onTickInstalled(e) {
     occ, symbol, company, strike, expiry,
     purchaseDate, pricePaid, limit,
   ]]);
+  // Format Expiration (col 5) + Purchase Date (col 6) on row 2.
+  dedicatedTab.getRange(2, 5, 1, 2).setNumberFormat('yyyy-mm-dd');
   dedicatedTab.getRange(4, 1, 1, DAILY_HEADERS.length).setValues([DAILY_HEADERS]);
   dedicatedTab.getRange(5, 1, 1, DAILY_HEADERS.length).setValues([[
     purchaseDate, dte, underlying, bid, ask, pricePaid,
     0, ivr, '', '', expectedMove,
   ]]);
+  // Format the entire daily Date column (col A from row 5) so rows the
+  // Python refresh appends later display in the same yyyy-mm-dd shape.
+  dedicatedTab.getRange('A5:A').setNumberFormat('yyyy-mm-dd');
 
   // Reset the checkbox so a second tick on the same row doesn't re-fire.
   range.setValue(false);
@@ -209,4 +218,15 @@ function todayIsoEt() {
   // Use the spreadsheet's timezone so the date matches what Stan sees.
   const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone() || 'America/New_York';
   return Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+}
+
+function isoDate(v) {
+  // Sheets parses our screener's ISO date strings into Date cells, so reading
+  // them back yields a JS Date whose default String() is the long timezone
+  // form. Re-format anything date-shaped as yyyy-MM-dd; pass strings through.
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone() || 'America/New_York';
+    return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+  }
+  return String(v || '').trim();
 }
