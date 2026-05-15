@@ -74,8 +74,23 @@ Step 3. For each surviving symbol, in order:
        - Treat 'none' (from either source) as "no upcoming earnings".
        Pass the date (or null) as `earnings_date` to `submit_candidate`. Earnings
        inside the DTE window does NOT disqualify the symbol.
-   3b. Enumerate puts whose expiry is in the DTE window AND falls on the 3rd Friday
-       of its month (standard monthly expiry). Pick at most 2 such monthly expiries.
+   3b. Enumerate puts whose expiry meets BOTH conditions:
+       (i)  The expiry is a standard monthly expiry — the 3rd Friday of the month
+            (or Thursday if the 3rd Friday is a US market holiday such as
+            Juneteenth Jun 19 2026 or Good Friday). Weekly expiries (any Friday
+            other than the 3rd, or non-Friday end-of-week expiries) MUST be
+            excluded.
+       (ii) The number of calendar days from today (the date in the user prompt)
+            to that expiry is INCLUSIVELY within the configured DTE band.
+            Compute this explicitly for each candidate monthly expiry. Do NOT
+            include monthlies whose DTE falls outside the band, even if they are
+            the only nearby monthlies. Example: if today is 2026-05-14 and the
+            DTE band is 30-60, then May 15 (1 DTE) and July 17 (64 DTE) are OUT
+            OF BAND and must be excluded; only June 18 (35 DTE) qualifies.
+       Pick UP TO 2 qualifying expiries. Fewer is fine — if only one qualifies,
+       use only that one. If zero qualify for this symbol, submit no candidates
+       for it and move on.
+
        For each chosen expiry, pick at most 6 OTM put strikes (strike < spot)
        clustered near the spot price — roughly 5-15% OTM is where the configured
        delta band typically lands. Far-OTM strikes (>20% OTM) will fail the delta

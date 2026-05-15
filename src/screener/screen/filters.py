@@ -5,9 +5,12 @@ applies the filter chain. Lives behind no IO — easy to unit test.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import date
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,14 +56,31 @@ def passes_monthly(contract: dict) -> bool:
     return expiry is not None and is_third_friday(expiry)
 
 
+def _drop_reason(c: dict, p: FilterParams) -> str | None:
+    """First filter the contract fails, or None if it passes all."""
+    if not passes_ivr(c, p):
+        return f"ivr={c.get('ivr')!r} (need >={p.ivr_min})"
+    if not passes_dte(c, p):
+        return f"dte={c.get('dte')!r} (need {p.dte_min}-{p.dte_max})"
+    if not passes_delta(c, p):
+        d = c.get("delta")
+        return f"delta={d!r} |d|={abs(d) if d is not None else None} (need {p.delta_min}-{p.delta_max})"
+    if not passes_monthly(c):
+        return f"non-monthly expiry={c.get('expiry')!r}"
+    return None
+
+
 def screen(contracts: list[dict], p: FilterParams) -> list[dict]:
-    out = [
-        c for c in contracts
-        if passes_ivr(c, p)
-        and passes_dte(c, p)
-        and passes_delta(c, p)
-        and passes_monthly(c)
-    ]
+    out = []
+    for c in contracts:
+        reason = _drop_reason(c, p)
+        if reason is None:
+            out.append(c)
+        else:
+            log.info(
+                "filter drop: %s exp=%s strike=%sP — %s",
+                c.get("symbol"), c.get("expiry"), c.get("strike"), reason,
+            )
     out.sort(key=lambda c: (c.get("ivr") or 0.0), reverse=True)
     return out
 
