@@ -4,8 +4,8 @@
  * When the user ticks a Track checkbox in column S of the Latest tab,
  * copy that row's option into the tracker sheet:
  *   - Append a new row to the main tracker tab.
- *   - Create a dedicated per-option tab (named with the OCC string).
- *   - Write static info at the top + day-1 daily row.
+ *   - Create a dedicated per-option tab (named with the OCC string):
+ *     a single flat table, row 1 headers + row 2 the day-1 data row.
  *   - Link the main-row OCC cell to that dedicated tab (click to open).
  *   - Reset the checkbox so the same row can't fire twice.
  *
@@ -60,11 +60,6 @@ const MAIN_HEADERS = [
 const DAILY_HEADERS = [
   'Date', 'DTE', 'Underlying', 'Bid', 'Ask', 'Current Price',
   'P&L', 'IVR', 'VIX', 'IVx', 'Range',
-];
-
-const STATIC_HEADERS = [
-  'OCC', 'Symbol', 'Company', 'Strike', 'Expiration',
-  'Purchase Date', 'Price Paid', 'Limit',
 ];
 
 function onTickInstalled(e) {
@@ -137,28 +132,22 @@ function onTickInstalled(e) {
   const mainRowIdx = mainTab.getLastRow();
   mainTab.getRange(mainRowIdx, 5, 1, 2).setNumberFormat('yyyy-mm-dd');
 
-  // Dedicated tab — create or reuse.
+  // Dedicated tab — create or reuse. Single flat table: row 1 is the
+  // headers, row 2+ is one row per scan.
   let dedicatedTab = tracker.getSheetByName(occ);
   if (!dedicatedTab) {
     dedicatedTab = tracker.insertSheet(occ);
   } else {
     dedicatedTab.clear();
   }
-  dedicatedTab.getRange(1, 1, 1, STATIC_HEADERS.length).setValues([STATIC_HEADERS]);
-  dedicatedTab.getRange(2, 1, 1, STATIC_HEADERS.length).setValues([[
-    occ, symbol, company, strike, expiry,
-    purchaseDate, pricePaid, limit,
-  ]]);
-  // Format Expiration (col 5) + Purchase Date (col 6) on row 2.
-  dedicatedTab.getRange(2, 5, 1, 2).setNumberFormat('yyyy-mm-dd');
-  dedicatedTab.getRange(4, 1, 1, DAILY_HEADERS.length).setValues([DAILY_HEADERS]);
-  dedicatedTab.getRange(5, 1, 1, DAILY_HEADERS.length).setValues([[
+  dedicatedTab.getRange(1, 1, 1, DAILY_HEADERS.length).setValues([DAILY_HEADERS]);
+  dedicatedTab.getRange(2, 1, 1, DAILY_HEADERS.length).setValues([[
     purchaseDate, dte, underlying, bid, ask, pricePaid,
     0, ivr, '', '', expectedMove,
   ]]);
-  // Format the entire daily Date column (col A from row 5) so rows the
-  // Python refresh appends later display in the same yyyy-mm-dd shape.
-  dedicatedTab.getRange('A5:A').setNumberFormat('yyyy-mm-dd');
+  // Format the daily Date column (col A from row 2) so rows the Python
+  // refresh appends later display in the same yyyy-mm-dd shape.
+  dedicatedTab.getRange('A2:A').setNumberFormat('yyyy-mm-dd');
 
   // Make the main-row OCC cell a clickable link to this option's
   // dedicated tab, so Stan can jump straight to it from the summary.
