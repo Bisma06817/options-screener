@@ -165,10 +165,21 @@ class TrackerClient:
         ]
 
     @_RETRY
-    def update_main_row(self, occ: str, updates: dict[str, Any]) -> None:
+    def update_main_row(
+        self,
+        occ: str,
+        updates: dict[str, Any],
+        dedicated_tab_gid: int | None = None,
+    ) -> None:
         """Update specific columns on the main row matching the given OCC.
 
         `updates` keys must be column header names from MAIN_HEADERS.
+
+        When `dedicated_tab_gid` is given, the OCC cell is (re)written as an
+        in-sheet HYPERLINK formula pointing at that option's dedicated tab,
+        so Stan can click straight from the main listing to the per-option
+        sheet. The cell still *displays* the OCC string, so the OCC join key
+        keeps reading back correctly via get_all_records.
         """
         ws, header_row = self._main_tab()
         if ws is None or header_row is None:
@@ -202,6 +213,12 @@ class TrackerClient:
                 "range": f"{_col_letter(col_idx)}{target_row}",
                 "values": [[_serialize(value)]],
             })
+        if dedicated_tab_gid is not None:
+            occ_col = MAIN_HEADERS.index("OCC") + 1  # 1-based
+            cell_updates.append({
+                "range": f"{_col_letter(occ_col)}{target_row}",
+                "values": [[_occ_hyperlink(occ, dedicated_tab_gid)]],
+            })
         if cell_updates:
             ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
 
@@ -229,7 +246,11 @@ class TrackerClient:
 
     @_RETRY
     def append_daily_row(
-        self, occ: str, position: dict[str, Any], daily: dict[str, Any]
+        self,
+        occ: str,
+        position: dict[str, Any],
+        daily: dict[str, Any],
+        ws: gspread.Worksheet | None = None,
     ) -> None:
         """Upsert today's daily row on this option's dedicated tab.
 
@@ -239,8 +260,13 @@ class TrackerClient:
 
         `daily` keys must be column header names from DAILY_HEADERS.
         Missing keys are written as empty string.
+
+        Pass `ws` to reuse an already-resolved dedicated tab and skip the
+        extra ensure_dedicated_tab round-trip (the refresh loop resolves the
+        tab once so it can also link the main row to it).
         """
-        ws = self.ensure_dedicated_tab(occ, position)
+        if ws is None:
+            ws = self.ensure_dedicated_tab(occ, position)
         row = [_serialize(daily.get(h, "")) for h in DAILY_HEADERS]
         today_iso = _serialize(daily.get("Date", ""))
 
@@ -258,6 +284,17 @@ class TrackerClient:
             ws.update(target_a1, [row], value_input_option="USER_ENTERED")
         else:
             ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+def _occ_hyperlink(occ: str, gid: int) -> str:
+    """An in-sheet HYPERLINK formula whose displayed text is the OCC string.
+
+    `=HYPERLINK("#gid=<gid>", "<OCC>")` jumps to the per-option tab when
+    clicked but still renders as the plain OCC string, so get_all_records
+    (which reads formatted values) keeps matching on it.
+    """
+    label = str(occ).replace('"', '""')
+    return f'=HYPERLINK("#gid={gid}","{label}")'
 
 
 def _serialize(v: Any) -> Any:

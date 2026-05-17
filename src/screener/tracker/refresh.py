@@ -184,8 +184,13 @@ async def refresh_open_positions_async(
             continue
 
         try:
-            tracker.update_main_row(position["OCC"], row_updates)
-            tracker.append_daily_row(position["OCC"], position, daily)
+            # Resolve the dedicated tab once: its gid links the main row to
+            # it, and reusing the worksheet skips a second ensure round-trip.
+            ws = tracker.ensure_dedicated_tab(position["OCC"], position)
+            tracker.update_main_row(
+                position["OCC"], row_updates, dedicated_tab_gid=ws.id
+            )
+            tracker.append_daily_row(position["OCC"], position, daily, ws=ws)
             updated += 1
         except Exception as e:
             log.exception("Tracker refresh: write failed for %s: %s", position.get("OCC"), e)
