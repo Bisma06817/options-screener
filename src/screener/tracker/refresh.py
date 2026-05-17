@@ -167,6 +167,10 @@ async def refresh_open_positions_async(
 
     updated = 0
     for position, occ in parsed_positions:
+        # Heal the Expiration cell: legacy main-tab rows store a JS Date
+        # toString(); replace it with the parsed ISO date so both the main
+        # tab and the per-option tab's static columns show a clean date.
+        position["Expiration"] = occ.expiration.isoformat()
         try:
             row_updates, daily = _compute_row(
                 position, occ, today, quote_by_label, metrics_by_sym, vix_value
@@ -182,11 +186,11 @@ async def refresh_open_positions_async(
         try:
             # Resolve the dedicated tab once: its gid links the main row to
             # it, and reusing the worksheet skips a second ensure round-trip.
-            ws = tracker.ensure_dedicated_tab(position["OCC"])
+            ws = tracker.ensure_dedicated_tab(position["OCC"], position)
             tracker.update_main_row(
                 position["OCC"], row_updates, dedicated_tab_gid=ws.id
             )
-            tracker.append_daily_row(position["OCC"], daily, ws=ws)
+            tracker.append_daily_row(position["OCC"], position, daily, ws=ws)
             updated += 1
         except Exception as e:
             log.exception("Tracker refresh: write failed for %s: %s", position.get("OCC"), e)

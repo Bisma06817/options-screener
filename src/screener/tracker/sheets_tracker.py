@@ -10,11 +10,10 @@ sheet. Schema:
     Range | Limit
 
   Per-option tabs (one tab per ticked option, named with the OCC string)
-  are a single flat table, same shape as every other sheet:
-    Row 1  : daily-row headers (DAILY_HEADERS)
-    Row 2+ : one row appended per scan with the day's price + IV data
-  The option's static info (Strike, Expiration, Price Paid ...) lives on
-  the main tab only — it isn't repeated on the per-option tab.
+  are one flat table, same shape as every other sheet:
+    Row 1  : the full header (PER_OPTION_HEADERS) — static columns
+             (OCC, Symbol ... Limit) then daily columns (Date ... Range)
+    Row 2+ : one row per scan; the static columns repeat on every row.
 
 All gspread calls are wrapped with the same tenacity backoff as the
 screener output client so transient API blips don't kill the refresh.
@@ -57,15 +56,25 @@ MAIN_HEADERS = [
     "IVR", "VIX", "IVx", "Range", "Limit",
 ]
 
-# Per-option tab daily row schema.
+# Per-option tab daily-data columns (recomputed every scan).
 DAILY_HEADERS = [
     "Date", "DTE", "Underlying", "Bid", "Ask", "Current Price",
     "P&L", "IVR", "VIX", "IVx", "Range",
 ]
 
-# 1-based row where the daily-row header is written. The per-option tab
-# is a single flat table, so the header is row 1 and data starts at row 2.
-_DAILY_HEADER_ROW = 1
+# Per-option tab static columns — the option's fixed info, carried from
+# the main tab and repeated on every row so the tab is one flat table.
+STATIC_HEADERS = [
+    "OCC", "Symbol", "Company", "Strike", "Expiration",
+    "Purchase Date", "Price Paid", "Limit",
+]
+
+# Full per-option tab header row: static columns then daily columns.
+PER_OPTION_HEADERS = STATIC_HEADERS + DAILY_HEADERS
+
+# 1-based column of the 'Date' field within PER_OPTION_HEADERS — used to
+# tell whether the last row already holds today's scan.
+_DATE_COL = len(STATIC_HEADERS) + 1
 
 
 class TrackerClient:
@@ -218,28 +227,32 @@ class TrackerClient:
             ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
 
     @_RETRY
-    def ensure_dedicated_tab(self, occ: str) -> gspread.Worksheet:
+    def ensure_dedicated_tab(
+        self, occ: str, position: dict[str, Any]
+    ) -> gspread.Worksheet:
         """Return the per-option tab, creating it if missing.
 
-        The tab is a single flat table: row 1 is DAILY_HEADERS, row 2+ is
-        one row per scan. Tabs still on the old two-block layout (static
-        info in rows 1-2, daily header on row 4) are migrated in place on
-        the next refresh, preserving any existing daily rows.
+        The tab is one flat table: row 1 is PER_OPTION_HEADERS (static
+        columns then daily columns), row 2+ is one row per scan. Tabs on
+        any older layout are migrated in place: their existing daily rows
+        are salvaged and each is prefixed with the option's static info
+        from `position`.
         """
         try:
             ws = self._sh.worksheet(occ)
         except gspread.WorksheetNotFound:
-            ws = self._sh.add_worksheet(occ, rows=500, cols=len(DAILY_HEADERS))
-            ws.update("A1", [DAILY_HEADERS], value_input_option="USER_ENTERED")
+            ws = self._sh.add_worksheet(occ, rows=500, cols=len(PER_OPTION_HEADERS))
+            ws.update("A1", [PER_OPTION_HEADERS], value_input_option="USER_ENTERED")
             log.info("Created dedicated tracker tab: %s", occ)
             return ws
 
-        if ws.row_values(1)[: len(DAILY_HEADERS)] == DAILY_HEADERS:
-            return ws  # already on the single-table layout
+        if ws.row_values(1)[: len(PER_OPTION_HEADERS)] == PER_OPTION_HEADERS:
+            return ws  # already on the flat single-table layout
 
-        # Old two-block layout (or an unrecognised one) — migrate to a
-        # single flat table. Salvage any existing daily rows: they sit
-        # below the row whose first cell is the 'Date' header.
+        # Older layout — migrate. Existing daily rows sit below the row
+        # whose first cell is the 'Date' header (old two-block layout, or
+        # an earlier daily-only table). Salvage them and re-prefix each
+        # with the option's static info so the tab becomes one flat table.
         rows = ws.get_all_values()
         daily_rows: list[list[str]] = []
         for i, r in enumerate(rows):
@@ -248,11 +261,14 @@ class TrackerClient:
                     x for x in rows[i + 1 :] if any(str(c).strip() for c in x)
                 ]
                 break
-        payload = [DAILY_HEADERS] + [r[: len(DAILY_HEADERS)] for r in daily_rows]
+        static_vals = [_serialize(position.get(h, "")) for h in STATIC_HEADERS]
+        payload = [PER_OPTION_HEADERS]
+        for d in daily_rows:
+            payload.append(static_vals + d[: len(DAILY_HEADERS)])
         ws.clear()
         ws.update("A1", payload, value_input_option="USER_ENTERED")
         log.info(
-            "Migrated dedicated tab %s to single-table layout (%d daily row(s) kept)",
+            "Migrated dedicated tab %s to flat layout (%d daily row(s) kept)",
             occ, len(daily_rows),
         )
         return ws
@@ -261,38 +277,40 @@ class TrackerClient:
     def append_daily_row(
         self,
         occ: str,
+        position: dict[str, Any],
         daily: dict[str, Any],
         ws: gspread.Worksheet | None = None,
     ) -> None:
-        """Upsert today's daily row on this option's dedicated tab.
+        """Upsert today's row on this option's dedicated tab.
 
-        If the last data row's Date equals today's daily['Date'], overwrite
-        that row (so the Apps Script's partial day-1 row gets healed on the
-        next cron). Otherwise append a new row.
-
-        `daily` keys must be column header names from DAILY_HEADERS.
-        Missing keys are written as empty string.
+        Each row is the option's static info (from `position`, columns
+        STATIC_HEADERS) followed by the day's daily data (DAILY_HEADERS).
+        If the last row's Date equals today's daily['Date'], that row is
+        overwritten (so the Apps Script's partial day-1 row gets healed on
+        the next cron); otherwise a new row is appended.
 
         Pass `ws` to reuse an already-resolved dedicated tab and skip the
         extra ensure_dedicated_tab round-trip (the refresh loop resolves the
         tab once so it can also link the main row to it).
         """
         if ws is None:
-            ws = self.ensure_dedicated_tab(occ)
-        row = [_serialize(daily.get(h, "")) for h in DAILY_HEADERS]
+            ws = self.ensure_dedicated_tab(occ, position)
+        static_vals = [_serialize(position.get(h, "")) for h in STATIC_HEADERS]
+        daily_vals = [_serialize(daily.get(h, "")) for h in DAILY_HEADERS]
+        row = static_vals + daily_vals
         today_iso = _serialize(daily.get("Date", ""))
 
         # Read the Date column unformatted so we get either a Sheets serial
         # (number, when the cell is a real date) or the raw string (when it
         # was written as text). Locale display format then doesn't matter.
-        date_col = ws.col_values(1, value_render_option="UNFORMATTED_VALUE")
+        date_col = ws.col_values(_DATE_COL, value_render_option="UNFORMATTED_VALUE")
         last_row = len(date_col)
         same_day = (
-            last_row > _DAILY_HEADER_ROW
+            last_row > 1
             and _is_same_iso_date(date_col[last_row - 1], today_iso)
         )
         if same_day:
-            target_a1 = f"A{last_row}:{_col_letter(len(DAILY_HEADERS))}{last_row}"
+            target_a1 = f"A{last_row}:{_col_letter(len(PER_OPTION_HEADERS))}{last_row}"
             ws.update(target_a1, [row], value_input_option="USER_ENTERED")
         else:
             ws.append_row(row, value_input_option="USER_ENTERED")
