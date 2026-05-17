@@ -6,6 +6,7 @@
  *   - Append a new row to the main tracker tab.
  *   - Create a dedicated per-option tab (named with the OCC string).
  *   - Write static info at the top + day-1 daily row.
+ *   - Link the main-row OCC cell to that dedicated tab (click to open).
  *   - Reset the checkbox so the same row can't fire twice.
  *
  * Setup (one-time):
@@ -158,6 +159,16 @@ function onTickInstalled(e) {
   // Format the entire daily Date column (col A from row 5) so rows the
   // Python refresh appends later display in the same yyyy-mm-dd shape.
   dedicatedTab.getRange('A5:A').setNumberFormat('yyyy-mm-dd');
+
+  // Make the main-row OCC cell a clickable link to this option's
+  // dedicated tab, so Stan can jump straight to it from the summary.
+  // The cell still displays the plain OCC string, so the duplicate
+  // check above and the Python refresh both keep matching on it.
+  const occCol = MAIN_HEADERS.indexOf('OCC') + 1; // 1-based
+  mainTab.getRange(mainRowIdx, occCol).setFormula(
+    '=HYPERLINK("#gid=' + dedicatedTab.getSheetId() + '","' +
+    occ.replace(/"/g, '""') + '")'
+  );
 
   // Reset the checkbox so a second tick on the same row doesn't re-fire.
   range.setValue(false);
