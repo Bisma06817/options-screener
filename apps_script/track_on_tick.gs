@@ -70,6 +70,12 @@ const PER_OPTION_DAILY_HEADERS = [
 const PER_OPTION_HEADER_ROW = 5;
 const PER_OPTION_DATA_START_ROW = 6;
 
+// Cell styling — matches the colour scheme on Stan's existing per-option
+// tabs (dark blue title + header, medium blue label cells, white bold text).
+const STYLE_DARK_BLUE = '#1F3864';
+const STYLE_MEDIUM_BLUE = '#2E75B6';
+const STYLE_WHITE = '#FFFFFF';
+
 function onTickInstalled(e) {
   if (!e || !e.range) return;
   const range = e.range;
@@ -205,6 +211,7 @@ function onTickInstalled(e) {
     dedicatedTab.getRange(3, 1, 1, row3[0].length).setValues(row3);
     dedicatedTab.getRange(PER_OPTION_HEADER_ROW, 1, 1, PER_OPTION_DAILY_HEADERS.length)
       .setValues(headerRow);
+    styleStaticBlock(dedicatedTab, PER_OPTION_DAILY_HEADERS.length);
   }
   // Append day-1: row 6 if no daily data yet, else the row right below
   // the last non-empty Date cell. Never overwrite existing rows.
@@ -239,6 +246,40 @@ function onTickInstalled(e) {
 
   // Reset the checkbox so a second tick on the same row doesn't re-fire.
   range.setValue(false);
+}
+
+function styleStaticBlock(ws, dailyColCount) {
+  // Visual styling to match Stan's existing per-option tabs:
+  //   Row 1 title           : dark blue background, white bold text, merged
+  //   Row 2 / 3 label cells : medium blue background, white bold text
+  //   Row 5 column headers  : dark blue background, white bold text
+  // Value cells stay default (white background, black text).
+  const titleRange = ws.getRange(1, 1, 1, dailyColCount);
+  titleRange.merge()
+    .setBackground(STYLE_DARK_BLUE)
+    .setFontColor(STYLE_WHITE)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('left');
+
+  // Row 2 has 6 label/value pairs starting at col 1 — labels in odd cols.
+  [1, 3, 5, 7, 9, 11].forEach(function (c) {
+    ws.getRange(2, c)
+      .setBackground(STYLE_MEDIUM_BLUE)
+      .setFontColor(STYLE_WHITE)
+      .setFontWeight('bold');
+  });
+  // Row 3 has 5 label/value pairs.
+  [1, 3, 5, 7, 9].forEach(function (c) {
+    ws.getRange(3, c)
+      .setBackground(STYLE_MEDIUM_BLUE)
+      .setFontColor(STYLE_WHITE)
+      .setFontWeight('bold');
+  });
+
+  ws.getRange(PER_OPTION_HEADER_ROW, 1, 1, dailyColCount)
+    .setBackground(STYLE_DARK_BLUE)
+    .setFontColor(STYLE_WHITE)
+    .setFontWeight('bold');
 }
 
 function findMainTab(tracker) {

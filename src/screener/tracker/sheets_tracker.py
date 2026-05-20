@@ -73,6 +73,24 @@ _HEADER_ROW = 5         # daily column headers live on row 5
 _DATA_START_ROW = 6     # daily rows start at row 6
 _DATE_COL = 1           # Date is column A in the daily table
 
+# Cell colours matching Stan's existing per-option tabs.
+# Dark blue for title + column-header row, medium blue for label cells,
+# white bold text. Values are gspread's 0-1 RGB floats.
+_DARK_BLUE = {"red": 31 / 255, "green": 56 / 255, "blue": 100 / 255}
+_MEDIUM_BLUE = {"red": 46 / 255, "green": 117 / 255, "blue": 182 / 255}
+_WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
+
+_TITLE_FMT = {
+    "backgroundColor": _DARK_BLUE,
+    "textFormat": {"foregroundColor": _WHITE, "bold": True},
+    "horizontalAlignment": "LEFT",
+}
+_LABEL_FMT = {
+    "backgroundColor": _MEDIUM_BLUE,
+    "textFormat": {"foregroundColor": _WHITE, "bold": True},
+}
+_HEADER_FMT = _TITLE_FMT
+
 
 class TrackerClient:
     def __init__(self, service_account_json: str, spreadsheet_id: str):
@@ -364,6 +382,7 @@ class TrackerClient:
             ],
             value_input_option="USER_ENTERED",
         )
+        _apply_static_block_styling(ws, len(PER_OPTION_DAILY_HEADERS))
 
     def _migrate_flat_layout(self, ws, occ: str, position: dict[str, Any]) -> None:
         """Migrate a tab from the OLD flat-table layout to the new layout.
@@ -447,6 +466,42 @@ class TrackerClient:
             "Migrated %s from flat layout to new layout (%d daily row(s) kept)",
             occ, len(migrated),
         )
+
+
+def _apply_static_block_styling(ws, daily_col_count: int) -> None:
+    """Style rows 1, 2, 3, 5 to match Stan's existing per-option tabs.
+
+    Row 1: title across all columns, merged, dark-blue background.
+    Rows 2/3: label cells (odd columns) get medium-blue background;
+        value cells (even columns) stay default white.
+    Row 5: column headers, dark-blue background.
+    Failures here are non-fatal — visual polish should never block a
+    daily refresh if the Sheets formatting API hiccups.
+    """
+    try:
+        last_col = _col_letter(daily_col_count)
+        # Merge row 1 across the full width so the title spans the tab.
+        try:
+            ws.merge_cells(f"A1:{last_col}1", merge_type="MERGE_ALL")
+        except Exception as e:
+            log.debug("merge_cells skipped on %s: %s", ws.title, e)
+        ws.batch_format([
+            {"range": f"A1:{last_col}1", "format": _TITLE_FMT},
+            {"range": "A2", "format": _LABEL_FMT},
+            {"range": "C2", "format": _LABEL_FMT},
+            {"range": "E2", "format": _LABEL_FMT},
+            {"range": "G2", "format": _LABEL_FMT},
+            {"range": "I2", "format": _LABEL_FMT},
+            {"range": "K2", "format": _LABEL_FMT},
+            {"range": "A3", "format": _LABEL_FMT},
+            {"range": "C3", "format": _LABEL_FMT},
+            {"range": "E3", "format": _LABEL_FMT},
+            {"range": "G3", "format": _LABEL_FMT},
+            {"range": "I3", "format": _LABEL_FMT},
+            {"range": f"A{_HEADER_ROW}:{last_col}{_HEADER_ROW}", "format": _HEADER_FMT},
+        ])
+    except Exception as e:
+        log.warning("Per-option tab %s: styling failed (non-fatal): %s", ws.title, e)
 
 
 def _occ_hyperlink(occ: str, gid: int) -> str:
