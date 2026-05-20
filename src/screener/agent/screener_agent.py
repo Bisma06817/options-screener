@@ -109,6 +109,9 @@ Field rules for `submit_candidate`:
 - `expiry` and `earnings_date` are ISO YYYY-MM-DD; `earnings_date` may be null.
 - `put_price` is the bid-ask mid: (bid + ask) / 2.
 - `pop_pct` is the standard short-put proxy: (1 - |delta|) * 100, in percent (0-100).
+- `ivr` is the IVR PERCENT on a 0-100 scale (so 87.46% rank is 87.46, not 0.8746).
+  If `get_market_metrics` returns iv_rank as a 0-1 decimal, multiply by 100 before
+  passing it here. The filter threshold in the user prompt is on the same 0-100 scale.
 - `expected_move` = underlying_price * IVx * sqrt(DTE / 365). IVx is decimal (0.42 = 42%).
   If you do not have a usable IVx, pass null.
 - `delta` is signed (negative for puts).
@@ -183,6 +186,12 @@ async def run_screen_async(
                 ed = date.fromisoformat(earnings_date)
             except ValueError:
                 return f"rejected: bad earnings_date {earnings_date!r}"
+        # Normalize IVR to percent (0-100). tasty-agent's iv_rank field has
+        # been observed in both scales: 0-100 (pre-2026-05-19) and 0-1 from
+        # 2026-05-19 on. Anything <= 1.0 is taken as a decimal rank and scaled
+        # up. A real percent IVR of 1% means the stock isn't worth trading
+        # anyway, so the heuristic is safe.
+        ivr_pct = ivr * 100.0 if (ivr is not None and 0 <= ivr <= 1.0) else ivr
         sym_u = symbol.upper()
         candidates.append({
             "scan_date": today,
@@ -193,7 +202,7 @@ async def run_screen_async(
             "put_price": put_price,
             "dte": dte,
             "pop_pct": pop_pct,
-            "ivr": ivr,
+            "ivr": ivr_pct,
             "delta": delta,
             "expiry": exp_d,
             "p50_pct": _p50_from_delta(delta),
