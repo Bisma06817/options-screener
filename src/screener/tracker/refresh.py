@@ -268,10 +268,16 @@ def _compute_row(
 
     price_paid = _to_float(position.get("Price Paid"))
     pnl = (price_paid - current_price) if (price_paid is not None and current_price is not None) else None
-    limit = (price_paid * 0.5) if price_paid is not None else None
 
     dte = max((occ.expiration - today).days, 0)
     expected_move = _expected_move(underlying, ivx, dte)
+
+    difference = (underlying - occ.strike) if underlying is not None else None
+    # Per-option-tab Limit and main-tab Limit both = Share Price - Range
+    # value (Stan's "maximum price" concept from the 5/10 ORCL screenshot).
+    # Daily rows render Range as ±$X.XX and Limit as the raw underlying-EM.
+    limit_value = (underlying - expected_move) if (underlying is not None and expected_move is not None) else None
+    range_dollar_str = f"±${abs(expected_move):.2f}" if expected_move is not None else None
 
     row_updates: dict[str, Any] = {
         # Expiration is included so that legacy rows written with a JS
@@ -283,21 +289,25 @@ def _compute_row(
         "IVR": ivr,
         "VIX": vix_value,
         "IVx": (ivx * 100.0) if ivx is not None else None,  # percent for display
-        "Range": expected_move,
-        "Limit": limit,
+        "Range": range_dollar_str,
+        "Limit": limit_value,
     }
+    # Daily-tab dict keys MUST match PER_OPTION_DAILY_HEADERS in
+    # sheets_tracker.py (Date, OCC, Expiration, DTE, Share Price, Strike,
+    # Difference, Option Price, P&L, Range, Limit). Anything missing
+    # renders as an empty cell.
     daily: dict[str, Any] = {
         "Date": today,
+        "OCC": occ_str,
+        "Expiration": occ.expiration,
         "DTE": dte,
-        "Underlying": underlying,
-        "Bid": bid,
-        "Ask": ask,
-        "Current Price": current_price,
+        "Share Price": underlying,
+        "Strike": occ.strike,
+        "Difference": difference,
+        "Option Price": current_price,
         "P&L": pnl,
-        "IVR": ivr,
-        "VIX": vix_value,
-        "IVx": (ivx * 100.0) if ivx is not None else None,
-        "Range": expected_move,
+        "Range": range_dollar_str,
+        "Limit": limit_value,
     }
     return row_updates, daily
 

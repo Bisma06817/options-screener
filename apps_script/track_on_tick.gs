@@ -4,8 +4,9 @@
  * When the user ticks a Track checkbox in column S of the Latest tab,
  * copy that row's option into the tracker sheet:
  *   - Append a new row to the main tracker tab.
- *   - Create a dedicated per-option tab (named with the OCC string):
- *     one flat table, row 1 the full header + row 2 the day-1 row.
+ *   - Create a dedicated per-option tab (named with the OCC string) in
+ *     Stan's legacy layout: rows 1-3 static info, row 4 blank, row 5
+ *     daily column headers, row 6+ daily rows.
  *   - Link the main-row OCC cell to that dedicated tab (click to open).
  *   - Reset the checkbox so the same row can't fire twice.
  *
@@ -57,18 +58,17 @@ const MAIN_HEADERS = [
   'IVR', 'VIX', 'IVx', 'Range', 'Limit',
 ];
 
-const DAILY_HEADERS = [
-  'Date', 'DTE', 'Underlying', 'Bid', 'Ask', 'Current Price',
-  'P&L', 'IVR', 'VIX', 'IVx', 'Range',
+// Per-option tab daily-data columns (row 5 headers; row 6+ is one row
+// per scan). Must match PER_OPTION_DAILY_HEADERS in sheets_tracker.py.
+const PER_OPTION_DAILY_HEADERS = [
+  'Date', 'OCC', 'Expiration', 'DTE', 'Share Price', 'Strike',
+  'Difference', 'Option Price', 'P&L', 'Range', 'Limit',
 ];
 
-const STATIC_HEADERS = [
-  'OCC', 'Symbol', 'Company', 'Strike', 'Expiration',
-  'Purchase Date', 'Price Paid', 'Limit',
-];
-
-// Full per-option tab header: static columns then daily columns.
-const PER_OPTION_HEADERS = STATIC_HEADERS.concat(DAILY_HEADERS);
+// Per-option tab layout: rows 1-3 static info, row 4 blank, row 5 header,
+// row 6+ daily data.
+const PER_OPTION_HEADER_ROW = 5;
+const PER_OPTION_DATA_START_ROW = 6;
 
 function onTickInstalled(e) {
   if (!e || !e.range) return;
@@ -103,7 +103,18 @@ function onTickInstalled(e) {
   const expectedMove = Number(rowData[COL.EXPECTED_MOVE - 1]) || '';
 
   const pricePaid = roundTo(midOf(bid, ask), 4);
-  const limit = roundTo(pricePaid * 0.5, 4);
+  // Limit follows Stan's "maximum price" definition: Share Price minus
+  // the dollar expected move (Range value). Used on both the main tab
+  // and the per-option daily rows.
+  const limit = (isFinite(underlying) && isFinite(expectedMove) && expectedMove !== '')
+    ? roundTo(underlying - Number(expectedMove), 2)
+    : '';
+  const rangeDollarStr = (isFinite(expectedMove) && expectedMove !== '')
+    ? '±$' + Math.abs(Number(expectedMove)).toFixed(2)
+    : '';
+  const difference = (isFinite(underlying) && isFinite(strike))
+    ? roundTo(Number(underlying) - Number(strike), 4)
+    : '';
   const purchaseDate = todayIsoEt();
 
   const tracker = SpreadsheetApp.openById(TRACKER_SHEET_ID);
@@ -129,39 +140,92 @@ function onTickInstalled(e) {
     return;
   }
 
-  // Main-tab row.
+  // Main-tab row. Range column gets the ±$ string; Limit is the raw
+  // Share-minus-Range number (numeric so subsequent updates can compute on it).
   mainTab.appendRow([
     occ, symbol, company, strike, expiry,
     purchaseDate, pricePaid, pricePaid, 0, 'OPEN',
-    ivr, '', '', expectedMove, limit,
+    ivr, '', '', rangeDollarStr, limit,
   ]);
   // Force yyyy-mm-dd on the just-written Expiration (col 5) + Purchase Date
   // (col 6) cells so display is locale-independent.
   const mainRowIdx = mainTab.getLastRow();
   mainTab.getRange(mainRowIdx, 5, 1, 2).setNumberFormat('yyyy-mm-dd');
 
-  // Dedicated tab — create or reuse. One flat table: row 1 is the full
-  // header (static columns then daily columns), row 2+ one row per scan.
+  // Dedicated tab — create or reuse. New layout matches Stan's legacy tabs:
+  //   Row 1 : Position title
+  //   Row 2 : Symbol/Name/Strike/Price Paid/IVx/Range labels + values
+  //   Row 3 : Expiration/Quantity/Direction/Purchase Date/VIX labels + values
+  //   Row 4 : blank
+  //   Row 5 : daily column headers
+  //   Row 6 : day-1 row (this tick)
   let dedicatedTab = tracker.getSheetByName(occ);
   if (!dedicatedTab) {
     dedicatedTab = tracker.insertSheet(occ);
   } else {
-    dedicatedTab.clear();
+    // Existing tab — only re-init if it's NOT already on the new (or
+    // Stan's legacy) layout. A leading "Position:" cell means leave it.
+    const row1First = String(dedicatedTab.getRange(1, 1).getValue() || '').trim();
+    if (!row1First.startsWith('Position:')) {
+      dedicatedTab.clear();
+    }
   }
-  const staticVals = [
-    occ, symbol, company, strike, expiry, purchaseDate, pricePaid, limit,
-  ];
-  const dailyVals = [
-    purchaseDate, dte, underlying, bid, ask, pricePaid,
-    0, ivr, '', '', expectedMove,
-  ];
-  dedicatedTab.getRange(1, 1, 1, PER_OPTION_HEADERS.length).setValues([PER_OPTION_HEADERS]);
-  dedicatedTab.getRange(2, 1, 1, PER_OPTION_HEADERS.length)
-    .setValues([staticVals.concat(dailyVals)]);
-  // Format the date columns: Expiration (col 5), Purchase Date (col 6),
-  // and the daily Date column (col 9, from row 2 down).
-  dedicatedTab.getRange(2, 5, 1, 2).setNumberFormat('yyyy-mm-dd');
-  dedicatedTab.getRange('I2:I').setNumberFormat('yyyy-mm-dd');
+
+  const title = 'Position: ' + company + ' (' + symbol + ') - ' + strike + ' Put';
+  const row1 = [[title]];
+  const row2 = [[
+    'Symbol:', symbol,
+    'Name:', company,
+    'Strike:', strike,
+    'Price Paid:', pricePaid,
+    'IVx:', '',          // Apps Script has no IVx; left blank, like Stan's snapshot.
+    'Range:', rangeDollarStr,
+  ]];
+  const row3 = [[
+    'Expiration:', expiry,
+    'Quantity:', 1,
+    'Direction:', 'Short',
+    'Purchase Date:', purchaseDate,
+    'VIX:', '',          // Apps Script has no live VIX; left blank.
+  ]];
+  const headerRow = [PER_OPTION_DAILY_HEADERS];
+  const dayOne = [[
+    purchaseDate, occ, expiry, dte,
+    underlying, strike, difference,
+    pricePaid, 0, rangeDollarStr, limit,
+  ]];
+
+  // Write static block + header only when the tab is fresh or was cleared.
+  // If the layout is already correct ("Position:" on row 1), preserve it
+  // and just append day-1 below whatever data is already there.
+  const row1Now = String(dedicatedTab.getRange(1, 1).getValue() || '').trim();
+  if (!row1Now.startsWith('Position:')) {
+    dedicatedTab.getRange(1, 1, 1, 1).setValues(row1);
+    dedicatedTab.getRange(2, 1, 1, row2[0].length).setValues(row2);
+    dedicatedTab.getRange(3, 1, 1, row3[0].length).setValues(row3);
+    dedicatedTab.getRange(PER_OPTION_HEADER_ROW, 1, 1, PER_OPTION_DAILY_HEADERS.length)
+      .setValues(headerRow);
+  }
+  // Append day-1: row 6 if no daily data yet, else the row right below
+  // the last non-empty Date cell. Never overwrite existing rows.
+  const dateCol = dedicatedTab.getRange('A' + PER_OPTION_DATA_START_ROW + ':A')
+    .getValues().map(function (r) { return r[0]; });
+  let lastDataIdx = -1;
+  for (let i = 0; i < dateCol.length; i++) {
+    if (dateCol[i] !== '' && dateCol[i] !== null) lastDataIdx = i;
+  }
+  const dayOneRow = (lastDataIdx >= 0)
+    ? PER_OPTION_DATA_START_ROW + lastDataIdx + 1
+    : PER_OPTION_DATA_START_ROW;
+  dedicatedTab.getRange(dayOneRow, 1, 1, PER_OPTION_DAILY_HEADERS.length)
+    .setValues(dayOne);
+  // Format the date cells: Expiration (row 3 col 2), Purchase Date (row 3 col 8),
+  // and the daily Date column (col A, row 6 down).
+  dedicatedTab.getRange(3, 2).setNumberFormat('yyyy-mm-dd');
+  dedicatedTab.getRange(3, 8).setNumberFormat('yyyy-mm-dd');
+  dedicatedTab.getRange('A' + PER_OPTION_DATA_START_ROW + ':A').setNumberFormat('yyyy-mm-dd');
+  // Expiration column inside the daily table (col C from row 6 down).
+  dedicatedTab.getRange('C' + PER_OPTION_DATA_START_ROW + ':C').setNumberFormat('yyyy-mm-dd');
 
   // Make the main-row OCC cell a clickable link to this option's
   // dedicated tab, so Stan can jump straight to it from the summary.
@@ -183,7 +247,8 @@ function findMainTab(tracker) {
   // (cheap), then scan the first few sheets for an OCC header in rows
   // 1-5 — permissive 'contains OCC' match so 'OCC Symbol' or 'OCC' both
   // count. Returns { sheet, headerRow } or null.
-  const CANDIDATE_NAMES = ['Tab', 'Positions', 'Tracker', 'Open Positions'];
+  const CANDIDATE_NAMES = ['Tab', 'Positions', 'Tracker', 'Open Positions',
+                           'Tasty Trade Open Position 2026', 'Summary'];
   const MAX_HEADER_ROW = 5;
   const MAX_SCAN_SHEETS = 10;
 

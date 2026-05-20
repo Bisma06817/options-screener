@@ -10,10 +10,16 @@ sheet. Schema:
     Range | Limit
 
   Per-option tabs (one tab per ticked option, named with the OCC string)
-  are one flat table, same shape as every other sheet:
-    Row 1  : the full header (PER_OPTION_HEADERS) — static columns
-             (OCC, Symbol ... Limit) then daily columns (Date ... Range)
-    Row 2+ : one row per scan; the static columns repeat on every row.
+  follow Stan's legacy layout exactly:
+    Row 1: Position: <Company> (<SYMBOL>) - <Strike> Put
+    Row 2: Symbol: <SYM>  Name: <Company>  Strike: <strike>
+           Price Paid: <price>  IVx: <ivx>%  Range: <range>
+    Row 3: Expiration: <expiry>  Quantity: 1  Direction: Short
+           Purchase Date: <date>  VIX: <vix>
+    Row 4: (blank)
+    Row 5: Date | OCC | Expiration | DTE | Share Price | Strike |
+           Difference | Option Price | P&L | Range | Limit
+    Row 6+: one row per scan (Date in col A, upsert by date).
 
 All gspread calls are wrapped with the same tenacity backoff as the
 screener output client so transient API blips don't kill the refresh.
@@ -56,25 +62,16 @@ MAIN_HEADERS = [
     "IVR", "VIX", "IVx", "Range", "Limit",
 ]
 
-# Per-option tab daily-data columns (recomputed every scan).
-DAILY_HEADERS = [
-    "Date", "DTE", "Underlying", "Bid", "Ask", "Current Price",
-    "P&L", "IVR", "VIX", "IVx", "Range",
+# Per-option tab daily-data column headers — matches Stan's legacy layout.
+PER_OPTION_DAILY_HEADERS = [
+    "Date", "OCC", "Expiration", "DTE", "Share Price", "Strike",
+    "Difference", "Option Price", "P&L", "Range", "Limit",
 ]
 
-# Per-option tab static columns — the option's fixed info, carried from
-# the main tab and repeated on every row so the tab is one flat table.
-STATIC_HEADERS = [
-    "OCC", "Symbol", "Company", "Strike", "Expiration",
-    "Purchase Date", "Price Paid", "Limit",
-]
-
-# Full per-option tab header row: static columns then daily columns.
-PER_OPTION_HEADERS = STATIC_HEADERS + DAILY_HEADERS
-
-# 1-based column of the 'Date' field within PER_OPTION_HEADERS — used to
-# tell whether the last row already holds today's scan.
-_DATE_COL = len(STATIC_HEADERS) + 1
+# Layout positions on the per-option tab (1-based row/col numbers).
+_HEADER_ROW = 5         # daily column headers live on row 5
+_DATA_START_ROW = 6     # daily rows start at row 6
+_DATE_COL = 1           # Date is column A in the daily table
 
 
 class TrackerClient:
@@ -230,46 +227,50 @@ class TrackerClient:
     def ensure_dedicated_tab(
         self, occ: str, position: dict[str, Any]
     ) -> gspread.Worksheet:
-        """Return the per-option tab, creating it if missing.
+        """Return the per-option tab, creating or migrating it as needed.
 
-        The tab is one flat table: row 1 is PER_OPTION_HEADERS (static
-        columns then daily columns), row 2+ is one row per scan. Tabs on
-        any older layout are migrated in place: their existing daily rows
-        are salvaged and each is prefixed with the option's static info
-        from `position`.
+        Layout target: rows 1-3 hold Stan's static info block, row 4 is
+        blank, row 5 is PER_OPTION_DAILY_HEADERS, row 6+ is daily data.
+
+        Three cases:
+        1. Tab doesn't exist: create with the static block and headers
+           ready for the first append_daily_row.
+        2. Tab exists with row 1 starting "Position:" — already on the
+           target layout (Stan's legacy tabs and our newly-created tabs
+           both look like this). Leave it alone, only daily-row writes.
+        3. Tab exists with row 1 starting "OCC" — our previous flat-table
+           layout (fe653be / 1b35d64). Migrate: salvage the existing daily
+           rows, re-shape into the new 11-column daily schema, and write
+           the new static block on top.
+        4. Anything else: log and leave alone, never destroy unknown data.
         """
         try:
             ws = self._sh.worksheet(occ)
         except gspread.WorksheetNotFound:
-            ws = self._sh.add_worksheet(occ, rows=500, cols=len(PER_OPTION_HEADERS))
-            ws.update("A1", [PER_OPTION_HEADERS], value_input_option="USER_ENTERED")
+            ws = self._sh.add_worksheet(
+                occ, rows=500, cols=len(PER_OPTION_DAILY_HEADERS)
+            )
+            self._write_static_and_headers(ws, position)
             log.info("Created dedicated tracker tab: %s", occ)
             return ws
 
-        if ws.row_values(1)[: len(PER_OPTION_HEADERS)] == PER_OPTION_HEADERS:
-            return ws  # already on the flat single-table layout
+        first = ""
+        try:
+            row1 = ws.row_values(1)
+            first = (row1[0] if row1 else "").strip()
+        except Exception:
+            pass
 
-        # Older layout — migrate. Existing daily rows sit below the row
-        # whose first cell is the 'Date' header (old two-block layout, or
-        # an earlier daily-only table). Salvage them and re-prefix each
-        # with the option's static info so the tab becomes one flat table.
-        rows = ws.get_all_values()
-        daily_rows: list[list[str]] = []
-        for i, r in enumerate(rows):
-            if r and str(r[0]).strip() == "Date":
-                daily_rows = [
-                    x for x in rows[i + 1 :] if any(str(c).strip() for c in x)
-                ]
-                break
-        static_vals = [_serialize(position.get(h, "")) for h in STATIC_HEADERS]
-        payload = [PER_OPTION_HEADERS]
-        for d in daily_rows:
-            payload.append(static_vals + d[: len(DAILY_HEADERS)])
-        ws.clear()
-        ws.update("A1", payload, value_input_option="USER_ENTERED")
-        log.info(
-            "Migrated dedicated tab %s to flat layout (%d daily row(s) kept)",
-            occ, len(daily_rows),
+        if first.startswith("Position:"):
+            return ws
+
+        if first == "OCC":
+            self._migrate_flat_layout(ws, occ, position)
+            return ws
+
+        log.warning(
+            "Tracker tab %s has unrecognised layout (row 1 starts %r); leaving as-is",
+            occ, first[:40],
         )
         return ws
 
@@ -283,37 +284,169 @@ class TrackerClient:
     ) -> None:
         """Upsert today's row on this option's dedicated tab.
 
-        Each row is the option's static info (from `position`, columns
-        STATIC_HEADERS) followed by the day's daily data (DAILY_HEADERS).
-        If the last row's Date equals today's daily['Date'], that row is
-        overwritten (so the Apps Script's partial day-1 row gets healed on
-        the next cron); otherwise a new row is appended.
+        Daily rows live on row 6+. If the last non-empty row in column A
+        already matches today's date, that row is overwritten (so the
+        Apps Script's day-1 row gets healed on the next cron); otherwise
+        a new row is appended directly below the last data row.
 
-        Pass `ws` to reuse an already-resolved dedicated tab and skip the
-        extra ensure_dedicated_tab round-trip (the refresh loop resolves the
-        tab once so it can also link the main row to it).
+        Pass `ws` to reuse a worksheet already resolved by the refresh
+        loop and skip another ensure round-trip.
         """
         if ws is None:
             ws = self.ensure_dedicated_tab(occ, position)
-        static_vals = [_serialize(position.get(h, "")) for h in STATIC_HEADERS]
-        daily_vals = [_serialize(daily.get(h, "")) for h in DAILY_HEADERS]
-        row = static_vals + daily_vals
+        row_values = [_serialize(daily.get(h, "")) for h in PER_OPTION_DAILY_HEADERS]
         today_iso = _serialize(daily.get("Date", ""))
 
-        # Read the Date column unformatted so we get either a Sheets serial
-        # (number, when the cell is a real date) or the raw string (when it
-        # was written as text). Locale display format then doesn't matter.
         date_col = ws.col_values(_DATE_COL, value_render_option="UNFORMATTED_VALUE")
-        last_row = len(date_col)
-        same_day = (
-            last_row > 1
-            and _is_same_iso_date(date_col[last_row - 1], today_iso)
-        )
-        if same_day:
-            target_a1 = f"A{last_row}:{_col_letter(len(PER_OPTION_HEADERS))}{last_row}"
-            ws.update(target_a1, [row], value_input_option="USER_ENTERED")
+        # date_col is 1-indexed by row: date_col[0] is row 1's value.
+        # Daily data starts at _DATA_START_ROW, so look at date_col[5:] for
+        # row 6 onwards.
+        data_slice = date_col[_DATA_START_ROW - 1 :] if len(date_col) >= _DATA_START_ROW else []
+        last_offset = -1
+        for i, v in enumerate(data_slice):
+            if v not in ("", None):
+                last_offset = i
+
+        if last_offset >= 0:
+            last_row = _DATA_START_ROW + last_offset
+            if _is_same_iso_date(data_slice[last_offset], today_iso):
+                target_row = last_row
+            else:
+                target_row = last_row + 1
         else:
-            ws.append_row(row, value_input_option="USER_ENTERED")
+            target_row = _DATA_START_ROW
+
+        last_col_letter = _col_letter(len(PER_OPTION_DAILY_HEADERS))
+        target_a1 = f"A{target_row}:{last_col_letter}{target_row}"
+        ws.update(target_a1, [row_values], value_input_option="USER_ENTERED")
+
+    def _write_static_and_headers(self, ws, position: dict[str, Any]) -> None:
+        """Write rows 1-3 (static info) + row 5 (daily headers) on a fresh tab.
+
+        Values pulled from the position dict (sourced from the main tracker
+        tab). IVx and Range get their value-at-creation snapshots; subsequent
+        refreshes do NOT touch this block, matching Stan's manual approach.
+        """
+        symbol = position.get("Symbol", "")
+        company = position.get("Company", "")
+        strike = position.get("Strike", "")
+        expiry = _serialize(position.get("Expiration", ""))
+        purchase = _serialize(position.get("Purchase Date", ""))
+        price_paid = position.get("Price Paid", "")
+        ivx_raw = position.get("IVx", "")
+        vix = position.get("VIX", "")
+        range_main = position.get("Range", "")
+
+        title = f"Position: {company} ({symbol}) - {strike} Put"
+        row1 = [title]
+        row2 = [
+            "Symbol:", symbol,
+            "Name:", company,
+            "Strike:", _serialize(strike),
+            "Price Paid:", _serialize(price_paid),
+            "IVx:", _format_ivx(ivx_raw),
+            "Range:", _format_range_dollars(range_main),
+        ]
+        row3 = [
+            "Expiration:", expiry,
+            "Quantity:", 1,
+            "Direction:", "Short",
+            "Purchase Date:", purchase,
+            "VIX:", _serialize(vix),
+        ]
+
+        ws.batch_update(
+            [
+                {"range": "A1", "values": [row1]},
+                {"range": "A2", "values": [row2]},
+                {"range": "A3", "values": [row3]},
+                {"range": f"A{_HEADER_ROW}", "values": [PER_OPTION_DAILY_HEADERS]},
+            ],
+            value_input_option="USER_ENTERED",
+        )
+
+    def _migrate_flat_layout(self, ws, occ: str, position: dict[str, Any]) -> None:
+        """Migrate a tab from the OLD flat-table layout to the new layout.
+
+        Old layout (fe653be / 1b35d64): row 1 = PER_OPTION_HEADERS starting
+        with 'OCC'; row 2+ = data rows where the first 8 cols are static
+        info repeated each row and the last 11 are daily data.
+
+        We extract the daily portion, reshape it into the new 11-col daily
+        schema (computing Difference and Limit on the fly), and rewrite
+        the tab with the new static block + headers + salvaged data.
+        """
+        rows = ws.get_all_values()
+        if not rows:
+            ws.clear()
+            self._write_static_and_headers(ws, position)
+            return
+
+        old_headers = rows[0]
+
+        def col_idx(name: str) -> int | None:
+            try:
+                return old_headers.index(name)
+            except ValueError:
+                return None
+
+        idx_date = col_idx("Date")
+        idx_dte = col_idx("DTE")
+        idx_under = col_idx("Underlying")
+        idx_strike = col_idx("Strike")
+        idx_expiry = col_idx("Expiration")
+        idx_occ = col_idx("OCC")
+        idx_curprice = col_idx("Current Price")
+        idx_pnl = col_idx("P&L")
+        idx_range = col_idx("Range")
+
+        migrated: list[list[Any]] = []
+        for r in rows[1:]:
+            if not any(str(c).strip() for c in r):
+                continue
+
+            def take(i: int | None) -> str:
+                if i is None or i >= len(r):
+                    return ""
+                return r[i]
+
+            occ_v = take(idx_occ) or occ
+            date_v = take(idx_date)
+            expiry_v = take(idx_expiry)
+            dte_v = take(idx_dte)
+            under_v = take(idx_under)
+            strike_v = take(idx_strike)
+            cur_v = take(idx_curprice)
+            pnl_v = take(idx_pnl)
+            range_v = take(idx_range)
+
+            under_f = _to_float(under_v)
+            strike_f = _to_float(strike_v)
+            range_f = _to_float(range_v)
+            diff_v = round(under_f - strike_f, 4) if (under_f is not None and strike_f is not None) else ""
+            range_fmt = _format_range_dollars(range_f) if range_f is not None else ""
+            limit_v = round(under_f - range_f, 2) if (under_f is not None and range_f is not None) else ""
+
+            migrated.append([
+                date_v, occ_v, expiry_v, dte_v,
+                _to_float(under_v) if _to_float(under_v) is not None else under_v,
+                _to_float(strike_v) if _to_float(strike_v) is not None else strike_v,
+                diff_v,
+                _to_float(cur_v) if _to_float(cur_v) is not None else cur_v,
+                _to_float(pnl_v) if _to_float(pnl_v) is not None else pnl_v,
+                range_fmt, limit_v,
+            ])
+
+        ws.clear()
+        self._write_static_and_headers(ws, position)
+        if migrated:
+            last_col_letter = _col_letter(len(PER_OPTION_DAILY_HEADERS))
+            target_a1 = f"A{_DATA_START_ROW}:{last_col_letter}{_DATA_START_ROW + len(migrated) - 1}"
+            ws.update(target_a1, migrated, value_input_option="USER_ENTERED")
+        log.info(
+            "Migrated %s from flat layout to new layout (%d daily row(s) kept)",
+            occ, len(migrated),
+        )
 
 
 def _occ_hyperlink(occ: str, gid: int) -> str:
@@ -337,6 +470,39 @@ def _serialize(v: Any) -> Any:
     return v
 
 
+def _to_float(v: Any) -> float | None:
+    """Best-effort float coercion. Handles '±$67.16', '51.0%', and numeric strings."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().lstrip("±").lstrip("$").rstrip("%").replace(",", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _format_ivx(v: Any) -> str:
+    """Render IVx as '51.0%' (percent scale). Accepts decimal 0-1 or percent 0-100."""
+    f = _to_float(v)
+    if f is None:
+        return ""
+    if 0 <= f <= 1.5:
+        f = f * 100.0
+    return f"{f:.1f}%"
+
+
+def _format_range_dollars(v: Any) -> str:
+    """Render the expected-move dollar value as '±$67.16'. Blank if unusable."""
+    f = _to_float(v)
+    if f is None:
+        return ""
+    return f"±${abs(f):.2f}"
+
+
 # Sheets stores dates as days since 1899-12-30 (Lotus 1-2-3 compat).
 _SHEETS_EPOCH = date(1899, 12, 30)
 
@@ -352,7 +518,6 @@ def _is_same_iso_date(cell_value: Any, iso: str) -> bool:
     except ValueError:
         return False
     if isinstance(cell_value, (int, float)):
-        # Sheets serial: integer days since 1899-12-30.
         try:
             target_serial = (target - _SHEETS_EPOCH).days
             return int(cell_value) == target_serial
