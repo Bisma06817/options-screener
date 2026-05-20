@@ -36,6 +36,9 @@ from .sheets_tracker import TrackerClient
 log = logging.getLogger(__name__)
 
 _QUOTE_TIMEOUT_SEC = 15.0
+# VIX gets a shorter, isolated timeout — it routinely never ticks, and we
+# don't want to burn the full window waiting for a quote that won't come.
+_VIX_TIMEOUT_SEC = 5.0
 _CHUNK_SIZE = 10
 
 
@@ -49,6 +52,13 @@ async def _gather_market_data(
     Returns a dict with:
       - quote_by_label: { "opt:<OCC>" | "stock:<SYM>" | "index:VIX" -> Quote }
       - metrics_by_sym: { symbol -> MarketMetricInfo }
+
+    VIX is fetched in its own best-effort call. It streams from a different
+    feed and routinely never ticks inside the window, and stream_events
+    raises if *any* requested symbol is missing — so bundling VIX with the
+    position quotes let one absent VIX quote kill the entire refresh
+    (observed on every run since 2026-05-14). Isolated, a missing VIX just
+    leaves the VIX column blank, which the client fills in manually anyway.
     """
     # Build a labelled instrument list so we can map quotes back by purpose.
     labelled: list[tuple[str, InstrumentSpec]] = []
@@ -66,7 +76,6 @@ async def _gather_market_data(
         ))
     for sym in sorted(symbols):
         labelled.append((f"stock:{sym}", InstrumentSpec(symbol=sym)))
-    labelled.append(("index:VIX", InstrumentSpec(symbol="VIX", instrument_type="Index")))
 
     async with Session(
         provider_secret=env.tt_client_secret,
@@ -85,9 +94,32 @@ async def _gather_market_data(
         quotes = await stream_events(session, Quote, streamer_symbols, _QUOTE_TIMEOUT_SEC)
         metrics_list = await get_market_metrics(session, sorted(symbols))
 
+        # VIX — best-effort and isolated; never let it fail the refresh.
+        vix_quote = await _try_vix_quote(session)
+
     quote_by_label = {label: quote for (label, _), quote in zip(labelled, quotes)}
+    if vix_quote is not None:
+        quote_by_label["index:VIX"] = vix_quote
     metrics_by_sym = {m.symbol: m for m in metrics_list}
     return {"quote_by_label": quote_by_label, "metrics_by_sym": metrics_by_sym}
+
+
+async def _try_vix_quote(session) -> Any | None:
+    """Stream a single VIX index quote, returning None on any failure.
+
+    VIX is a market-wide index, not tied to any position, so the refresh
+    must still update every option's price/P&L when VIX is unavailable.
+    """
+    try:
+        details = await get_instrument_details(
+            session, [InstrumentSpec(symbol="VIX", instrument_type="Index")]
+        )
+        streamer_symbols = [d.streamer_symbol for d in details]
+        quotes = await stream_events(session, Quote, streamer_symbols, _VIX_TIMEOUT_SEC)
+        return quotes[0] if quotes else None
+    except Exception as e:
+        log.warning("Tracker refresh: VIX quote unavailable (%s) — VIX left blank", e)
+        return None
 
 
 def _mid(bid: Any, ask: Any) -> float | None:
